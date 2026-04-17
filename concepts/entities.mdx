@@ -1,0 +1,181 @@
+---
+title: "Entities: Lightweight Handles in Arch ECS"
+description: "Understand the Entity struct in Arch — its Id, Version, and WorldId fields — and how to create, query, inspect, and destroy entities through the World API."
+---
+
+An `Entity` in Arch is a plain value-type handle — just three integers packed into a readonly struct. It carries no component data itself; it is simply an identifier that the `World` uses to look up an entity's archetype slot. Copying or storing entities is cheap because the struct is only a few bytes.
+
+## The Entity struct
+
+In the default (non-Pure-ECS) build, an `Entity` exposes three fields:
+
+```csharp
+public readonly struct Entity : IEquatable<Entity>, IComparable<Entity>
+{
+    public readonly int Id;      // Unique within its World
+    public readonly int WorldId; // Which World owns this entity
+    public readonly int Version; // Incremented each time the ID is recycled
+}
+```
+
+The `Version` field guards against dangling references. When an entity is destroyed its ID is recycled, and the version is bumped. A handle with the old version will no longer compare equal to the new entity occupying that slot.
+
+```csharp
+// A sentinel value used for null comparisons
+Entity none = Entity.Null; // Id = -1, Version = -1
+```
+
+<Note>
+  In the Pure-ECS build (`#if PURE_ECS`), the `WorldId` field is absent. `Entity` stores only `Id` and `Version`. All world operations must then be performed by passing both the entity and the world explicitly.
+</Note>
+
+## Spawning entities
+
+Entities are created through `world.Create`, which accepts a set of `ComponentType` values describing the initial component layout. The world finds or creates an appropriate archetype and returns the new handle.
+
+```csharp
+var world = World.Create();
+
+// Entity with no components
+Entity bare = world.Create();
+
+// Entity with an initial set of component types
+Entity player = world.Create(
+    typeof(Position),
+    typeof(Velocity),
+    typeof(Health)
+);
+```
+
+To create many entities of the same shape efficiently, use the bulk overload that fills a `Span<Entity>` with the new handles:
+
+```csharp
+var signature = new Signature(typeof(Position), typeof(Velocity));
+Span<Entity> buffer = stackalloc Entity[1000];
+world.Create(buffer, in signature, 1000);
+```
+
+## Destroying entities
+
+Destroying an entity is a structural change: the entity is removed from its archetype chunk and its ID is returned to the recycle queue.
+
+```csharp
+world.Destroy(entity);
+```
+
+An entire query result can be destroyed in a single pass without per-entity bookkeeping:
+
+```csharp
+var desc = new QueryDescription().WithAll<Enemy>();
+world.Destroy(in desc);
+```
+
+## Checking liveness
+
+Because IDs are recycled, always verify that a stored handle still refers to a live entity before using it:
+
+```csharp
+bool alive = world.IsAlive(entity);
+
+// Alternative: get the EntityData by-ref and receive the existence flag
+ref EntityData data = ref world.IsAlive(entity, out bool exists);
+```
+
+## Reading and writing components
+
+The `World` provides a typed API for accessing the components of a specific entity. `Get<T>` returns a reference, so writes are reflected in the underlying chunk array immediately.
+
+```csharp
+// Check presence
+bool hasPos = world.Has<Position>(entity);
+
+// Read (returns ref T — no copy for structs)
+ref Position pos = ref world.Get<Position>(entity);
+
+// Write via the ref
+world.Get<Position>(entity).X += 10f;
+
+// Overwrite with a new value
+world.Set<Position>(entity, new Position(1f, 2f));
+
+// Safe get — returns false instead of throwing if missing
+if (world.TryGet<Position>(entity, out Position copy))
+{
+    Console.WriteLine(copy.X);
+}
+```
+
+## Adding and removing components
+
+Adding or removing a component is a **structural change**: the entity migrates to a different archetype.
+
+```csharp
+// Add a component (entity moves to new archetype)
+world.Add<Frozen>(entity);
+world.Add<Velocity>(entity, new Velocity(0f, -9.8f)); // with initial value
+
+// Remove a component (entity moves to previous archetype)
+world.Remove<Frozen>(entity);
+
+// Add-or-get: returns existing ref if already present
+ref Health hp = ref world.AddOrGet<Health>(entity, new Health(100));
+```
+
+## EntityExtensions — entity-first API
+
+When the `WorldId` field is available (non-Pure-ECS), all world operations can be called directly on the entity as extension methods from `Arch.Core.Extensions`:
+
+```csharp
+using Arch.Core.Extensions;
+
+// Equivalent to world.Has<Position>(entity)
+bool hasPos = entity.Has<Position>();
+
+// Equivalent to world.Get<Position>(entity)
+ref Position pos = ref entity.Get<Position>();
+
+// Equivalent to world.Set<Position>(entity, value)
+entity.Set(new Position(3f, 4f));
+
+// Equivalent to world.Add<Velocity>(entity)
+entity.Add<Velocity>(new Velocity(1f, 0f));
+
+// Equivalent to world.Remove<Velocity>(entity)
+entity.Remove<Velocity>();
+
+// Check liveness without needing the world reference
+bool alive = entity.IsAlive();
+```
+
+## Reflection / inspection extensions
+
+```csharp
+// The Archetype this entity currently belongs to
+Archetype archetype = entity.GetArchetype();
+
+// The Chunk the entity is stored in
+ref readonly Chunk chunk = ref entity.GetChunk();
+
+// The component signature (set of ComponentTypes)
+Signature sig = entity.GetComponentTypes();
+
+// All component values as boxed object array (allocates)
+object?[] all = entity.GetAllComponents();
+```
+
+## Quick reference
+
+<CardGroup cols={2}>
+  <Card title="world.Create(...)" icon="plus">
+    Spawns a new entity with the given component types and returns its handle.
+  </Card>
+  <Card title="world.Destroy(entity)" icon="trash">
+    Removes the entity from its archetype and recycles its ID.
+  </Card>
+  <Card title="world.IsAlive(entity)" icon="heart">
+    Returns `true` if the handle still refers to a live entity.
+  </Card>
+  <Card title="world.Get&lt;T&gt;(entity)" icon="magnifying-glass">
+    Returns a `ref T` directly into chunk memory — zero-copy access.
+  </Card>
+</CardGroup>

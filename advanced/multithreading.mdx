@@ -1,0 +1,117 @@
+---
+title: "Multithreading: Parallel Queries Across CPU Cores"
+description: "Scale entity iteration across CPU cores with Arch's parallel query APIs. Configure ZeroAllocJobScheduler, run ParallelQuery, and schedule non-blocking jobs."
+---
+
+Arch supports parallel entity iteration through a job scheduler that distributes chunk processing across all available CPU cores. Parallel queries let you saturate hardware threads on large worlds without writing thread management code yourself. Before using any parallel API you must assign a `JobScheduler` instance to the static `World.SharedJobScheduler` property; failing to do so throws an exception at runtime.
+
+## Setting up the job scheduler
+
+Arch delegates threading to [ZeroAllocJobScheduler](https://github.com/genaray/ZeroAllocJobScheduler), a zero-allocation, fiber-based scheduler that ships as a NuGet dependency. Create and assign the scheduler once at application startup, before you call any parallel query.
+
+```csharp
+using Schedulers;
+
+World.SharedJobScheduler = new JobScheduler(
+    new JobScheduler.Config
+    {
+        ThreadPrefixName = "Arch.Worker",
+        ThreadCount = 0,          // 0 = one thread per logical CPU core
+        MaxExpectedConcurrentJobs = 64,
+        StrictAllocationMode = false,
+    }
+);
+```
+
+<Note>
+`ThreadCount = 0` instructs the scheduler to match `Environment.ProcessorCount`. Set an explicit value to limit parallelism, for example on shared servers.
+</Note>
+
+Dispose the scheduler when your application exits to release worker threads cleanly:
+
+```csharp
+World.SharedJobScheduler.Dispose();
+World.SharedJobScheduler = null;
+```
+
+## Running a parallel query
+
+`World.ParallelQuery` accepts the same `QueryDescription` used for single-threaded queries and a `ForEach` delegate. The world splits matching chunks across worker threads, blocks until all chunks finish, then returns.
+
+```csharp
+var query = new QueryDescription().WithAll<Position, Velocity>();
+
+world.ParallelQuery(in query, (Entity entity) =>
+{
+    // Called concurrently from multiple threads.
+    // Read-only access is safe; structural changes are NOT.
+});
+```
+
+<Warning>
+Parallel queries must be called from the main thread only. Structural changes (creating entities, adding or removing components) inside a parallel query are **not** thread-safe. Use a `CommandBuffer` to defer them.
+</Warning>
+
+## Inline parallel queries
+
+For hot paths, prefer `InlineParallelQuery<T>`, which accepts a struct implementing `IForEach`. Because the generic is resolved at compile time, there is no delegate allocation and the JIT can inline the body.
+
+<Steps>
+  <Step title="Implement IForEach">
+    Define a struct that implements `IForEach`. Keep it as a `struct` — value-type dispatch is required for inlining.
+
+    ```csharp
+    public struct MoveJob : IForEach
+    {
+        public void Update(Entity entity)
+        {
+            // your per-entity logic here
+        }
+    }
+    ```
+  </Step>
+  <Step title="Call InlineParallelQuery">
+    Pass the query description as the generic type argument. The world constructs the job internally.
+
+    ```csharp
+    var query = new QueryDescription().WithAll<Position, Velocity>();
+    world.InlineParallelQuery<MoveJob>(in query);
+    ```
+  </Step>
+  <Step title="Pass a preconfigured instance (optional)">
+    If the job struct carries state, construct an `IForEachJob<T>` wrapper with the populated struct and pass it directly.
+
+    ```csharp
+    var innerJob = new IForEachJob<MoveJob> { ForEach = new MoveJob() };
+    world.InlineParallelQuery<MoveJob>(in query, in innerJob);
+    ```
+  </Step>
+</Steps>
+
+## Scheduling without blocking
+
+`ScheduleInlineParallelChunkQuery` schedules work and returns a `JobHandle` immediately, letting you overlap CPU work with other tasks before waiting for completion.
+
+```csharp
+var innerJob = new IForEachJob<MoveJob> { ForEach = new MoveJob() };
+JobHandle handle = world.ScheduleInlineParallelChunkQuery(in query, in innerJob);
+
+// ... do other work ...
+
+handle.Complete(); // wait for all chunks to finish
+```
+
+## Thread safety rules
+
+<CardGroup cols={2}>
+  <Card title="Safe in parallel queries" icon="check">
+    Reading component data, writing component values for entities already owned by the current chunk, and accumulating results into thread-local state.
+  </Card>
+  <Card title="Not safe in parallel queries" icon="xmark">
+    Creating or destroying entities, adding or removing components, accessing shared mutable state without synchronisation.
+  </Card>
+</CardGroup>
+
+<Tip>
+Cache the `QueryDescription` in a field. Building a `QueryDescription` is cheap, but reusing the same instance avoids the internal query-cache lookup on every frame.
+</Tip>

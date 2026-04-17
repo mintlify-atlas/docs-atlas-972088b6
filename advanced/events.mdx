@@ -1,0 +1,169 @@
+---
+title: "Events: Entity and Component Lifecycle Callbacks"
+description: "Subscribe to world lifecycle callbacks that fire when entities are created or destroyed and when components are added, set, or removed."
+---
+
+Arch ships an opt-in event system that lets you register callbacks for entity lifecycle and component mutation events. Because events add a measurable overhead to every `Add`, `Set`, `Remove`, `Create`, and `Destroy` call, the system is compiled out by default and must be activated explicitly through a preprocessor symbol.
+
+## Enabling events
+
+Build the `Arch` project with the `EVENTS` preprocessor symbol defined. Two named build configurations in `Arch.csproj` set this symbol for you:
+
+<Tabs>
+  <Tab title="Debug build">
+    ```xml
+    <PropertyGroup Condition="'$(Configuration)'=='Debug-Events'">
+      <DefineConstants>TRACE;EVENTS;</DefineConstants>
+    </PropertyGroup>
+    ```
+
+    Select `Debug-Events` as the build configuration in your IDE or on the command line:
+
+    ```bash
+    dotnet build -c Debug-Events
+    ```
+  </Tab>
+  <Tab title="Release build">
+    ```xml
+    <PropertyGroup Condition="'$(Configuration)'=='Release-Events'">
+      <DefineConstants>TRACE;EVENTS;</DefineConstants>
+    </PropertyGroup>
+    ```
+
+    ```bash
+    dotnet build -c Release-Events
+    ```
+  </Tab>
+</Tabs>
+
+When you reference Arch as a NuGet package in your own project and want events, add the `EVENTS` constant to your own project file instead:
+
+```xml
+<DefineConstants>EVENTS</DefineConstants>
+```
+
+<Note>
+All `Subscribe*` methods compile to no-ops when `EVENTS` is not defined. You can leave subscription calls in your code and toggle the behaviour with the build configuration.
+</Note>
+
+## Available delegates
+
+The following delegate types are defined in `Arch.Core.Events`:
+
+```csharp
+// Entity lifecycle
+delegate void EntityCreatedHandler(in Entity entity);
+delegate void EntityDestroyedHandler(in Entity entity);
+
+// Component events — generic variants receive a ref to the component value
+delegate void ComponentAddedHandler<T>(in Entity entity, ref T comp);
+delegate void ComponentSetHandler<T>(in Entity entity, ref T comp);
+delegate void ComponentRemovedHandler<T>(in Entity entity, ref T comp);
+
+// Component events — non-generic variants receive only the entity
+delegate void ComponentAddedHandler(in Entity entity);
+delegate void ComponentSetHandler(in Entity entity);
+delegate void ComponentRemovedHandler(in Entity entity);
+```
+
+## Subscribing to events
+
+Call the appropriate `Subscribe*` method on the world instance. All subscriptions are additive — multiple handlers for the same event are all invoked in registration order.
+
+### Entity lifecycle
+
+```csharp
+world.SubscribeEntityCreated((in Entity entity) =>
+{
+    Console.WriteLine($"Entity {entity.Id} was created.");
+});
+
+world.SubscribeEntityDestroyed((in Entity entity) =>
+{
+    Console.WriteLine($"Entity {entity.Id} was destroyed.");
+});
+```
+
+### Component added
+
+The generic overload delivers a `ref` to the component so you can read or modify the value inside the handler without an extra lookup.
+
+```csharp
+world.SubscribeComponentAdded<Health>((in Entity entity, ref Health health) =>
+{
+    health.Current = health.Max; // initialise to full health on add
+    Console.WriteLine($"Health added to {entity.Id}, max = {health.Max}");
+});
+```
+
+### Component set
+
+Fires each time `world.Set<T>` is called on an entity that already carries the component.
+
+```csharp
+world.SubscribeComponentSet<Position>((in Entity entity, ref Position pos) =>
+{
+    Console.WriteLine($"Position updated for {entity.Id}: ({pos.X}, {pos.Y})");
+});
+```
+
+### Component removed
+
+Fires just before the component is stripped from the entity during an archetype move.
+
+```csharp
+world.SubscribeComponentRemoved<Frozen>((in Entity entity, ref Frozen frozen) =>
+{
+    Console.WriteLine($"Frozen removed from {entity.Id}");
+});
+```
+
+## Common use cases
+
+<AccordionGroup>
+  <Accordion title="Reactive UI updates">
+    Subscribe to `ComponentSetHandler<Health>` to push HP changes to a HUD without polling every frame.
+
+    ```csharp
+    world.SubscribeComponentSet<Health>((in Entity entity, ref Health hp) =>
+    {
+        if (entity == playerEntity)
+        {
+            hud.SetHealth(hp.Current, hp.Max);
+        }
+    });
+    ```
+  </Accordion>
+  <Accordion title="Debugging and logging">
+    Subscribe to entity lifecycle events during development to trace creation patterns.
+
+    ```csharp
+    world.SubscribeEntityCreated((in Entity entity) =>
+        logger.Debug("Created {id}", entity.Id));
+
+    world.SubscribeEntityDestroyed((in Entity entity) =>
+        logger.Debug("Destroyed {id}", entity.Id));
+    ```
+  </Accordion>
+  <Accordion title="Initialising dependent components">
+    Use `ComponentAddedHandler<T>` to ensure a dependent component is configured whenever a primary component arrives.
+
+    ```csharp
+    world.SubscribeComponentAdded<Rigidbody>((in Entity entity, ref Rigidbody rb) =>
+    {
+        if (!world.Has<Transform>(entity))
+        {
+            world.Add<Transform>(entity);
+        }
+    });
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+Handlers cannot be unsubscribed after registration. The event system's thread-safety guarantee depends on handler lists never shrinking. Design subscriptions to be long-lived for the duration of the world.
+</Warning>
+
+## Performance note
+
+Every structural operation that fires an event iterates the relevant handler list under a lock. In worlds with many entities and frequent component changes, event overhead accumulates quickly. Use the `EVENTS` build configuration only when the reactive behaviour it provides is necessary; prefer explicit polling or system-ordering for performance-critical paths.

@@ -1,0 +1,147 @@
+---
+title: "Arch ECS with Unity: AOT, IL2CPP, and Installation"
+description: "Learn how to integrate the Arch ECS library into a Unity project, including AOT/IL2CPP compatibility, the PURE_ECS define, and the Arch.Unity extension."
+---
+
+Arch targets .NET Standard 2.1, .NET 6, and .NET 8 — all of which Unity supports — so you can use Arch directly in any Unity project. Unity's two scripting backends (Mono and IL2CPP) each have different considerations, and Arch is designed to work with both through its AOT-friendly API and the optional `PURE_ECS` compilation symbol.
+
+## AOT compatibility
+
+Unity's IL2CPP backend compiles C# to C++ ahead of time (AOT), which strips generic code paths that are never referenced at compile time. Arch accommodates this in two ways:
+
+- **Default mode** uses generic APIs with lambda queries that are convenient for most projects. On IL2CPP, you may need to add `[Preserve]` attributes or use `link.xml` rules to prevent stripping of component types used only as type arguments.
+- **`PURE_ECS` mode** enables a fully AOT-friendly, non-generic API. Define `PURE_ECS` in your project's **Scripting Define Symbols** to activate it. In this mode, entity operations use `ComponentType` arrays instead of generics, which IL2CPP can handle without stripping concerns.
+
+The `.csproj` for Arch exposes both modes as build configurations (`Debug-PureECS`, `Release-PureECS`) and sets `<UnityPublish>true</UnityPublish>`, which tells compatible package tooling that the library is intended for Unity distribution.
+
+<Tabs>
+  <Tab title="Default (generic) API">
+    ```csharp
+    // Works on Mono; requires link.xml or [Preserve] on IL2CPP
+    var query = new QueryDescription().WithAll<Position, Velocity>();
+    world.Query(in query, (ref Position pos, ref Velocity vel) =>
+    {
+        pos.Vec2 += vel.Vec2;
+    });
+    ```
+  </Tab>
+  <Tab title="PURE_ECS API">
+    ```csharp
+    // Fully AOT-safe; activate with the PURE_ECS define symbol
+    world.Set(entity,
+        new Position { Vec2 = Vector2.zero },
+        new Velocity { Vec2 = new Vector2(1f, 0f) }
+    );
+
+    var query = new QueryDescription().WithAll<Position, Velocity>();
+    world.Query(in query, (ref Position pos, ref Velocity vel) =>
+    {
+        pos.Vec2 += vel.Vec2;
+    });
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  When using IL2CPP, test your build early. If you see `ExecutionEngineException` at runtime, add a `link.xml` that preserves your component structs, or switch to `PURE_ECS` mode.
+</Warning>
+
+## Arch.Unity extension
+
+[Arch.Unity](https://github.com/AnnulusGames/Arch.Unity) is a community extension that provides a deeper Unity integration on top of core Arch. It adds Unity-specific utilities, lifecycle helpers, and bridging between Unity's `GameObject` model and Arch entities.
+
+<CardGroup cols={2}>
+  <Card title="Arch.Unity on GitHub" icon="github" href="https://github.com/AnnulusGames/Arch.Unity">
+    Source code, samples, and installation instructions for the Unity integration package.
+  </Card>
+  <Card title="Core Arch on NuGet" icon="cube" href="https://www.nuget.org/packages/Arch/">
+    The base Arch package. Install this first if you are not using Arch.Unity.
+  </Card>
+</CardGroup>
+
+## Installation
+
+<Steps>
+  <Step title="Install NuGet for Unity">
+    Unity does not natively resolve NuGet packages. Use [NuGetForUnity](https://github.com/GlitchEnzo/NuGetForUnity) or the [Unity Package Manager (UPM)](https://docs.unity3d.com/Manual/upm-ui.html) to bring in NuGet packages.
+
+    With NuGetForUnity installed, open **NuGet → Manage NuGet Packages** in the Unity menu bar.
+  </Step>
+  <Step title="Add the Arch package">
+    Search for `Arch` in the NuGet package manager and install the latest stable version. This places the Arch DLLs in your `Assets/` folder where Unity can reference them.
+
+    Alternatively, if you are using Arch.Unity via UPM, follow the installation steps in the [Arch.Unity repository](https://github.com/AnnulusGames/Arch.Unity).
+  </Step>
+  <Step title="Set scripting define symbols (IL2CPP projects)">
+    If your project uses IL2CPP, go to **Edit → Project Settings → Player → Scripting Define Symbols** and add `PURE_ECS`. This switches Arch to its AOT-safe code path.
+  </Step>
+  <Step title="Configure managed stripping (optional)">
+    If you prefer to keep the generic API on IL2CPP, set **Managed Stripping Level** to **Minimal** or add a `link.xml` file to your `Assets/` folder that preserves your component types:
+
+    ```xml
+    <linker>
+      <assembly fullname="YourAssembly">
+        <type fullname="YourNamespace.Position" preserve="all" />
+        <type fullname="YourNamespace.Velocity" preserve="all" />
+      </assembly>
+    </linker>
+    ```
+  </Step>
+</Steps>
+
+## Basic example
+
+The pattern below creates an Arch `World` inside a `MonoBehaviour`, spawns entities in `Start()`, and runs a query every frame in `Update()`. Components are plain structs — no `MonoBehaviour` inheritance required.
+
+```csharp
+using Arch.Core;
+using UnityEngine;
+
+// Lightweight component structs — keep these outside MonoBehaviour
+public struct Position { public Vector2 Vec2; }
+public struct Velocity { public Vector2 Vec2; }
+
+public class ArchBootstrap : MonoBehaviour
+{
+    private World _world;
+    private QueryDescription _movementQuery;
+
+    private void Start()
+    {
+        _world = World.Create();
+        _movementQuery = new QueryDescription().WithAll<Position, Velocity>();
+
+        // Spawn 1 000 entities
+        for (var i = 0; i < 1_000; i++)
+        {
+            _world.Create(
+                new Position { Vec2 = Random.insideUnitCircle * 10f },
+                new Velocity { Vec2 = Random.insideUnitCircle }
+            );
+        }
+    }
+
+    private void Update()
+    {
+        var dt = Time.deltaTime;
+
+        _world.Query(in _movementQuery, (ref Position pos, ref Velocity vel) =>
+        {
+            pos.Vec2 += vel.Vec2 * dt;
+        });
+    }
+
+    private void OnDestroy()
+    {
+        World.Destroy(_world);
+    }
+}
+```
+
+<Note>
+  Declare your `QueryDescription` as a field rather than constructing it every frame. `QueryDescription` instances are reused and caching them avoids per-frame allocation.
+</Note>
+
+<Tip>
+  For larger projects, consider structuring your logic using the `SystemBase<T>` pattern from the [MonoGame samples](/integrations/monogame) adapted to Unity's `Update()` loop, or use the system abstractions provided by [Arch.Extended](https://github.com/genaray/Arch.Extended).
+</Tip>

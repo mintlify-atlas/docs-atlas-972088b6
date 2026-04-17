@@ -1,0 +1,110 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Arch ECS",
+  "projectDescription": "A high-performance C# Archetype & Chunks Entity Component System (ECS) for game development and data-oriented programming, with optional multithreading support.",
+  "theme": "palm",
+  "primaryColor": "#c05f68",
+  "lightColor": "#15182e",
+  "darkColor": "#7c6454",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/world",
+              "concepts/entities",
+              "concepts/components",
+              "concepts/archetypes"
+            ]
+          },
+          {
+            "group": "Querying",
+            "pages": [
+              "querying/query-description",
+              "querying/lambda-queries",
+              "querying/inline-queries",
+              "querying/enumerators"
+            ]
+          },
+          {
+            "group": "Advanced Features",
+            "pages": [
+              "advanced/multithreading",
+              "advanced/command-buffers",
+              "advanced/events",
+              "advanced/pure-ecs",
+              "advanced/performance"
+            ]
+          },
+          {
+            "group": "Integrations & Extensions",
+            "pages": [
+              "integrations/unity",
+              "integrations/godot",
+              "integrations/monogame",
+              "integrations/extensions"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Archetype-based entity storage with 16KB chunks for optimal cache efficiency",
+    "High-performance queries with lambda, inline, and enumerator APIs",
+    "Optional multithreaded parallel queries via ZeroAllocJobScheduler",
+    "CommandBuffers for deferred structural changes",
+    "Optional event system for component lifecycle hooks",
+    "Pure-ECS mode for maximum performance without entity world references",
+    "Generic and non-generic API for flexibility",
+    "AOT-friendly design for Unity and other platforms",
+    "Supports .NET Standard 2.1, .NET 6, and .NET 8"
+  ],
+  "publicApiSurface": [
+    "World.Create()",
+    "World.Destroy(world)",
+    "World.Create<T...>(components)",
+    "World.CreateBulk(count, types)",
+    "World.Destroy(entity)",
+    "World.Query(in QueryDescription, ForEach lambda)",
+    "World.InlineQuery<T>(in QueryDescription, ref IForEach job)",
+    "World.ParallelQuery(in QueryDescription, IForEachJob job)",
+    "World.Add<T>(entity, component)",
+    "World.Remove<T>(entity)",
+    "World.Set<T>(entity, component)",
+    "World.Get<T>(entity)",
+    "World.Has<T>(entity)",
+    "World.GetArchetype(entity)",
+    "World.SharedJobScheduler",
+    "QueryDescription.WithAll<T...>()",
+    "QueryDescription.WithAny<T...>()",
+    "QueryDescription.WithNone<T...>()",
+    "QueryDescription.WithExclusive<T...>()",
+    "Entity (struct)",
+    "ComponentType",
+    "Archetype",
+    "Chunk",
+    "CommandBuffer",
+    "CommandBuffer.Create(types)",
+    "CommandBuffer.Add<T>(entity, component)",
+    "CommandBuffer.Remove<T>(entity)",
+    "CommandBuffer.Playback(world)",
+    "IForEach.Update(Entity)",
+    "IForEach<T...>.Update(ref T...)",
+    "EntityCreatedHandler",
+    "EntityDestroyedHandler",
+    "ComponentAddedHandler<T>",
+    "ComponentRemovedHandler<T>"
+  ]
+}

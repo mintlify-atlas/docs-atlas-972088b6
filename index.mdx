@@ -1,97 +1,90 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Arch ECS: High-Performance C# Entity Component System"
+description: "Arch is a high-performance C# archetype ECS. Build data-oriented worlds with cache-friendly chunks, optional multithreading, and a clean minimal API."
 ---
 
-## Setting up
+Arch is a high-performance, archetype-based Entity Component System (ECS) for C# and .NET, designed for game development and data-oriented programming. It stores entities in archetypes backed by 16KB cache-friendly chunks, giving you iteration speeds that rival C++ and Rust ECS libraries — all with a clean, minimal API.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get Arch running and move your first entities in under five minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Install via NuGet for .NET 6, .NET 8, or .NET Standard 2.1.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Core Concepts" icon="layer-group" href="/concepts/world">
+    Learn about Worlds, Entities, Components, and Archetypes.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Querying" icon="magnifying-glass" href="/querying/query-description">
+    Query entities with lambda, inline, enumerator, and parallel APIs.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Arch?
 
-Everything you need to create world-class documentation.
+Arch is built for developers who need maximum performance without sacrificing ergonomics. It uses a classic archetype layout — grouping entities with identical component sets into contiguous memory chunks — ensuring tight cache usage even for worlds with millions of entities.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Cache-Efficient" icon="bolt">
+    16KB chunks pack entities with matching component signatures into contiguous memory for optimal CPU cache utilization.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Multithreaded" icon="microchip">
+    Optional parallel queries distribute work across all CPU cores via a zero-allocation job scheduler.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Minimal API" icon="code">
+    A clean, self-explanatory API with both generic and non-generic overloads to fit any coding style.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="CommandBuffers" icon="list-check">
+    Defer structural changes safely using command buffers — ideal for use inside query loops.
   </Card>
-</Columns>
+  <Card title="Events" icon="bell">
+    Subscribe to component lifecycle events with typed delegates for reactive game logic.
+  </Card>
+  <Card title="AOT Friendly" icon="puzzle-piece">
+    Works with Unity IL2CPP and other AOT compilation targets out of the box.
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Get started in three steps
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Install the NuGet package">
+    Add Arch to your project with the .NET CLI:
+    ```bash
+    dotnet add package Arch --version 2.1.0-beta
+    ```
+  </Step>
+  <Step title="Create a world and entities">
+    A `World` is the container for all your entities. Create one and spawn your first entity with components:
+    ```csharp
+    using Arch.Core;
+
+    public record struct Position(float X, float Y);
+    public record struct Velocity(float Dx, float Dy);
+
+    using var world = World.Create();
+    var entity = world.Create(new Position(0, 0), new Velocity(1, 1));
+    ```
+  </Step>
+  <Step title="Query and update entities">
+    Use `QueryDescription` to filter entities by their components, then iterate with a lambda:
+    ```csharp
+    var query = new QueryDescription().WithAll<Position, Velocity>();
+    world.Query(in query, (ref Position pos, ref Velocity vel) => {
+        pos.X += vel.Dx;
+        pos.Y += vel.Dy;
+    });
+    ```
+  </Step>
+</Steps>
+
+## Explore the documentation
+
+<CardGroup cols={2}>
+  <Card title="Advanced features" icon="gears" href="/advanced/multithreading">
+    Multithreading, command buffers, events, Pure-ECS mode, and performance tuning.
+  </Card>
+  <Card title="Integrations" icon="plug" href="/integrations/unity">
+    Use Arch with Unity, Godot, MonoGame, and the broader Arch.Extended ecosystem.
+  </Card>
+</CardGroup>

@@ -1,0 +1,163 @@
+---
+title: "World: The Central ECS Container in Arch"
+description: "Arch's World class owns every entity and archetype. Learn to create worlds, configure chunk sizing, manage thread-safety, and set up the shared job scheduler."
+---
+
+The `World` is the root object in Arch. It owns every entity, tracks every archetype, and is the entry point for all queries and structural changes. Multiple independent worlds can exist in the same process—each is completely self-contained and identified by a unique integer `Id`.
+
+## Creating and destroying worlds
+
+`World` is never constructed directly. Use the static factory method `World.Create()` to get a managed instance. Because `World` implements `IDisposable`, you can scope its lifetime with a `using` declaration.
+
+```csharp
+// Simplest form — uses default chunk settings
+var world = World.Create();
+
+// Custom chunk settings
+var world = World.Create(
+    chunkSizeInBytes: 16_384,          // minimum chunk size in bytes (default: 16 384)
+    minimumAmountOfEntitiesPerChunk: 100 // minimum entities per chunk (default: 100)
+);
+
+// Automatically disposed at end of scope
+using var world = World.Create();
+```
+
+To explicitly destroy a world and release its resources, call the static helper or dispose directly:
+
+```csharp
+World.Destroy(world); // calls world.Dispose() internally
+// — or —
+world.Dispose();
+```
+
+<Warning>
+  Calling `Dispose` (or `World.Destroy`) while queries are still executing is undefined behaviour. Complete all in-flight operations before tearing down a world.
+</Warning>
+
+## World identity and the global registry
+
+Every world is registered in a static array immediately after creation. You can inspect or iterate all live worlds at any time.
+
+```csharp
+// Number of currently live worlds
+int count = World.WorldSize;
+
+// Access a specific world by its ID
+World w = World.Worlds[someId];
+
+// Unique integer ID of this world instance
+int id = world.Id;
+
+// Number of entities currently stored
+int entityCount = world.Size;
+```
+
+`World.Worlds` is a `World[]` that is resized automatically as new worlds are created. IDs are recycled when worlds are destroyed, so a slot may be `null` if the world at that index has been disposed.
+
+## Chunk layout configuration
+
+When Arch allocates memory for a new archetype it sizes each `Chunk` using the parameters supplied to `World.Create`. The `ChunkLayoutMode` enum exposes three strategies:
+
+<AccordionGroup>
+  <Accordion title="FixedChunkSize">
+    Each chunk is exactly `FixedChunkSize` bytes. The number of entities that fit depends on the total byte size of the component set.
+
+    ```csharp
+    var config = new ChunkLayoutConfig
+    {
+        LayoutMode = ChunkLayoutMode.FixedChunkSize,
+        FixedChunkSize = 32 * 1024 // 32 KB per chunk
+    };
+    ```
+  </Accordion>
+
+  <Accordion title="FixedEntityCount">
+    Each chunk holds exactly `FixedEntityCount` entities. The chunk byte size grows to accommodate the component layout.
+
+    ```csharp
+    var config = new ChunkLayoutConfig
+    {
+        LayoutMode = ChunkLayoutMode.FixedEntityCount,
+        FixedEntityCount = 256
+    };
+    ```
+  </Accordion>
+
+  <Accordion title="MinChunkSizeAndMinEntities (default)">
+    Arch satisfies both a minimum byte size and a minimum entity count simultaneously, choosing whichever is larger. This is the mode used when you call `World.Create` with the default parameters.
+
+    ```csharp
+    var config = new ChunkLayoutConfig
+    {
+        LayoutMode = ChunkLayoutMode.MinChunkSizeAndMinEntities,
+        MinChunkSize = 16 * 1024, // at least 16 KB
+        MinEntityCount = 64       // at least 64 entities
+    };
+    ```
+  </Accordion>
+</AccordionGroup>
+
+The `World` exposes the raw values it was created with via `BaseChunkSize` and `BaseChunkEntityCount`:
+
+```csharp
+int minBytes    = world.BaseChunkSize;        // e.g. 16 384
+int minEntities = world.BaseChunkEntityCount; // e.g. 100
+```
+
+## Multithreading with SharedJobScheduler
+
+Read-only operations—iterating entities and reading components—are safe to run on multiple threads simultaneously. Structural changes (creating or destroying entities, adding or removing components) must never run alongside any other operation.
+
+For parallel queries Arch integrates with the `Schedulers` package through a single static scheduler:
+
+```csharp
+using Schedulers;
+
+// Set once at startup, before any parallel queries
+World.SharedJobScheduler = new JobScheduler(new JobScheduler.Config
+{
+    ThreadPrefixName = "Arch.Worker",
+    ThreadCount = 0, // 0 = use all logical processors
+});
+
+// ... run your parallel queries ...
+
+// Clean up at shutdown
+World.SharedJobScheduler.Dispose();
+World.SharedJobScheduler = null;
+```
+
+<Note>
+  `SharedJobScheduler` is `static`. All worlds in the same process share the same scheduler. Set it once at application startup before running any parallel workloads.
+</Note>
+
+## Utility methods
+
+```csharp
+// Count entities matching a query without iterating
+int n = world.CountEntities(new QueryDescription().WithAll<Position, Velocity>());
+
+// Release unused chunk memory (call infrequently)
+world.TrimExcess();
+
+// Destroy all entities and reset all archetypes
+world.Clear();
+```
+
+## Quick reference
+
+<CardGroup cols={2}>
+  <Card title="World.Create()" icon="plus">
+    Static factory that allocates a new world and registers it in `World.Worlds`.
+  </Card>
+  <Card title="World.Destroy(world)" icon="trash">
+    Static helper that calls `Dispose` and recycles the world's ID slot.
+  </Card>
+  <Card title="World.Size" icon="database">
+    The live entity count stored in this world instance.
+  </Card>
+  <Card title="World.SharedJobScheduler" icon="bolt">
+    Static `JobScheduler` shared by all worlds for parallel query execution.
+  </Card>
+</CardGroup>

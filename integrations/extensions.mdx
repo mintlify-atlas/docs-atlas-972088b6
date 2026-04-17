@@ -1,0 +1,102 @@
+---
+title: "Arch ECS Extensions, Integrations, and Ecosystem Guide"
+description: "Explore the official Arch.Extended library, Unity and Godot integrations, engine framework support, and community projects built on top of Arch ECS."
+---
+
+Arch is intentionally minimal — it provides the core archetype ECS and nothing more. The ecosystem around it fills in the gaps: official extensions for systems and source generators, engine-specific integration packages, in-editor debuggers, and full game projects that demonstrate Arch at scale. This page catalogues what is available and where to find it.
+
+## Official extensions
+
+### Arch.Extended
+
+[Arch.Extended](https://github.com/genaray/Arch.Extended) is the primary companion library maintained by the same author as Arch. It adds the abstractions and tooling that most real projects need, without baking them into the core library.
+
+<AccordionGroup>
+  <Accordion title="Systems">
+    Arch.Extended provides a fully featured system infrastructure — base classes, system groups, update ordering, and lifecycle hooks — so you do not need to write your own `SystemBase<T>`. Systems can declare their component queries via attributes, and the library wires the queries up automatically.
+  </Accordion>
+  <Accordion title="Source generators">
+    The source generator package analyses your system classes at compile time and emits boilerplate — query fields, `Update` method scaffolding, and component-access code — so you write less repetitive code. The generated output is inspectable in your IDE.
+  </Accordion>
+  <Accordion title="Additional tools">
+    Arch.Extended also includes utilities for serialisation, event buses, and other common game-development patterns that complement the core ECS without adding mandatory dependencies.
+  </Accordion>
+</AccordionGroup>
+
+Install it alongside Arch:
+
+```bash
+dotnet add package Arch.Extended
+```
+
+<CardGroup cols={1}>
+  <Card title="Arch.Extended on GitHub" icon="github" href="https://github.com/genaray/Arch.Extended">
+    Source, documentation, samples, and release notes for the official extension library.
+  </Card>
+</CardGroup>
+
+## Engine integrations
+
+### Arch.Unity
+
+[Arch.Unity](https://github.com/AnnulusGames/Arch.Unity) is a community-maintained Unity integration that bridges Arch entities with Unity's `GameObject` and component model. It provides lifecycle helpers, conversion utilities, and Unity-specific query extensions.
+
+See the [Unity integration guide](/integrations/unity) for installation steps and usage patterns.
+
+### Godot Entity Debugger
+
+The [Godot Entity Debugger](https://github.com/RoadTurtleGames/ArchGodotEntityDebugger) is a Godot editor extension that adds an entity inspector panel. At runtime you can browse archetypes, view all entities in a world, and inspect individual component values without writing any debug code yourself.
+
+### Stride Entity Debugger
+
+The [Stride Entity Debugger](https://github.com/Doprez/stride-arch-ecs) is an example project that shows Arch running inside the [Stride](https://www.stride3d.net/) game engine, with an entity and system inspector built on top. It serves as both a reference integration and a working debugger for Stride-based projects.
+
+<CardGroup cols={2}>
+  <Card title="Arch.Unity" icon="github" href="https://github.com/AnnulusGames/Arch.Unity">
+    Unity integration with lifecycle helpers and GameObject bridging.
+  </Card>
+  <Card title="Godot Entity Debugger" icon="github" href="https://github.com/RoadTurtleGames/ArchGodotEntityDebugger">
+    In-editor entity and component inspector for Godot.
+  </Card>
+  <Card title="Stride Entity Debugger" icon="github" href="https://github.com/Doprez/stride-arch-ecs">
+    Arch integration and entity inspector for the Stride engine.
+  </Card>
+</CardGroup>
+
+## Engine frameworks
+
+### Zinc Framework
+
+[Zinc](https://github.com/zinc-framework) is a small game engine framework built on top of Arch. It introduces a source generator that lets you declare entities declaratively — you describe the shape of an entity with attributes and the generator produces the `World.Create` calls, component structs, and archetype bindings at compile time.
+
+Zinc is a good starting point if you want Arch's performance with an opinionated project structure and less setup work.
+
+<CardGroup cols={1}>
+  <Card title="Zinc Framework on GitHub" icon="github" href="https://github.com/zinc-framework">
+    Engine framework built on Arch with declarative entity definitions via source generators.
+  </Card>
+</CardGroup>
+
+## Community projects using Arch
+
+These open-source projects demonstrate Arch at production or near-production scale and serve as real-world references.
+
+<AccordionGroup>
+  <Accordion title="Space Station 14">
+    [Space Station 14](https://spacestation14.io/) is a large open-source multiplayer game inspired by Space Station 13. It uses Arch for its entity component system and is one of the highest-profile real-world consumers of the library. Its source is publicly available and serves as a comprehensive example of Arch in a networked multiplayer context.
+  </Accordion>
+  <Accordion title="Roguelite-Survivor">
+    [Roguelite-Survivor](https://github.com/proc-gen/roguelite-survivor) is a MonoGame + Arch clone of Vampire Survivors. The project shows how to structure a full action game with Arch: components, systems, spawning, and per-frame parallel queries. It pairs well with the [MonoGame integration guide](/integrations/monogame).
+  </Accordion>
+  <Accordion title="EquilibriumEngine-CSharp">
+    [EquilibriumEngine-CSharp](https://github.com/clibequilibrium/EquilibriumEngine-CSharp) is a data-oriented C# game engine that combines Arch with hot-reloading of game logic libraries. It is a strong reference if you want to build tooling or an engine layer on top of Arch rather than integrate it into an existing engine.
+  </Accordion>
+</AccordionGroup>
+
+## Contributing an extension
+
+If you build a tool, debugger, or integration library for Arch, the project welcomes community additions. Open an issue or pull request on the [Arch GitHub repository](https://github.com/genaray/Arch) and your library can be listed in the README and docs alongside the official extensions.
+
+<Note>
+  The README entry for community tools reads: **"Your Tool-Library? — If you develop more tools and features for Arch, let us know and we'll list them here!"**
+</Note>

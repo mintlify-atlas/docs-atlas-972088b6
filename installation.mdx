@@ -1,0 +1,119 @@
+---
+title: "Installing Arch in a .NET Project"
+description: "Add the Arch NuGet package via the .NET CLI or PackageReference, then choose the right build configuration for standard use, Pure-ECS mode, or event support."
+---
+
+Arch is published on NuGet as the `Arch` package and targets `net8.0`, `net6.0`, and `netstandard2.1` from a single download. You can add it to any .NET project using the CLI or by editing your project file directly. No additional runtime dependencies or native libraries are required.
+
+## Adding the package
+
+<CodeGroup>
+
+```bash dotnet CLI
+dotnet add package Arch --version 2.1.0-beta
+```
+
+```xml PackageReference
+<PackageReference Include="Arch" Version="2.1.0-beta" />
+```
+
+</CodeGroup>
+
+Add the `PackageReference` inside an `<ItemGroup>` in your `.csproj` file if you prefer editing the project file directly.
+
+<Tip>
+  Always pin to an explicit version in production projects. Pre-release packages (those with a `-beta` suffix) may introduce breaking changes between releases.
+</Tip>
+
+## Target framework
+
+The correct multi-targeting build is selected automatically based on your project's `<TargetFramework>`:
+
+| Your target framework | Arch build used      |
+| --------------------- | -------------------- |
+| `net8.0`              | net8.0               |
+| `net6.0`              | net6.0               |
+| `netstandard2.1`      | netstandard2.1       |
+
+Unity and Godot projects that consume NuGet packages via a compatibility shim should target `netstandard2.1`.
+
+## Build configurations
+
+Arch ships three separate build configurations controlled by preprocessor defines. Each configuration trades features for performance in a different direction.
+
+<Note>
+  The default build is the right choice for most projects. Switch to `PURE_ECS` only when you have profiled and confirmed that entity extension methods are a bottleneck.
+</Note>
+
+### Default (standard)
+
+No preprocessor define is required. This is the recommended starting point. Entities are registered in a global world list, which enables the convenient extension-method API directly on `Entity` instances:
+
+```csharp
+// Extension methods are available on Entity
+entity.Add(new Velocity(1, 1));
+entity.Get<Position>();
+entity.Remove<Velocity>();
+entity.IsAlive();
+```
+
+### PURE_ECS
+
+Define `PURE_ECS` in your build to disable the global entity registry and all `Entity` extension methods. All operations go through the `World` instance instead, which removes one indirection and reduces memory overhead:
+
+```csharp
+// All operations go through World directly
+world.Add(entity, new Velocity(1, 1));
+world.Get<Position>(entity);
+world.Remove<Velocity>(entity);
+world.IsAlive(entity);
+```
+
+To enable `PURE_ECS`, add a `<DefineConstants>` entry to your project file:
+
+```xml
+<PropertyGroup>
+  <DefineConstants>PURE_ECS</DefineConstants>
+</PropertyGroup>
+```
+
+<Warning>
+  `PURE_ECS` is a compile-time switch. All code in your project — and any library compiled against Arch — must be consistent about which mode is active. Mixing modes across assemblies is not supported.
+</Warning>
+
+### EVENTS
+
+Define `EVENTS` to enable typed component lifecycle callbacks. When active, you can subscribe to events raised when components are added to or removed from entities:
+
+```csharp
+// Subscribe to component lifecycle events (generic type required)
+world.SubscribeComponentAdded<Position>((in Entity entity, ref Position pos) => {
+    Console.WriteLine($"Position added to entity {entity.Id}");
+});
+```
+
+To enable `EVENTS`:
+
+```xml
+<PropertyGroup>
+  <DefineConstants>EVENTS</DefineConstants>
+</PropertyGroup>
+```
+
+<Note>
+  `EVENTS` and `PURE_ECS` can be combined by listing both in `<DefineConstants>` separated by a semicolon: `PURE_ECS;EVENTS`.
+</Note>
+
+## Verifying the installation
+
+After adding the package, confirm the reference resolves by creating a minimal world in a console application:
+
+```csharp
+using Arch.Core;
+
+using var world = World.Create();
+Console.WriteLine($"World created. Capacity: {world.Capacity}");
+World.Destroy(world);
+```
+
+Run `dotnet run`. If it prints without errors, Arch is installed correctly.

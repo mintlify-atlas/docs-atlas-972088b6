@@ -1,0 +1,183 @@
+---
+title: "Components: Data Building Blocks in Arch ECS"
+description: "Learn how to define, register, and manipulate components in Arch — from struct design patterns to ComponentType metadata and the generic and non-generic APIs."
+---
+
+Components in Arch are pure data containers attached to entities. They carry no logic — behaviour lives in systems that query for specific component combinations. Arch imposes no base class or interface requirement on components; any C# struct qualifies.
+
+## Defining a component
+
+The recommended pattern is a `record struct` with positional members. Record structs get value equality, `ToString`, and deconstruction for free, while remaining stack-allocated value types.
+
+```csharp
+// Recommended: record struct with named fields
+public record struct Position(float X, float Y);
+public record struct Velocity(float X, float Y);
+public record struct Health(int Current, int Max);
+
+// Also valid: plain struct
+public struct Mass
+{
+    public float Kilograms;
+}
+
+// Reference types work but are stored as pointers — avoid where performance matters
+public class Tag { public string Name = ""; }
+```
+
+<Tip>
+  Keep components small. Each component type in an archetype consumes `sizeof(T)` bytes per entity slot inside a chunk. Large components reduce how many entities fit in a single 16 KB chunk, degrading cache efficiency.
+</Tip>
+
+## ComponentType metadata
+
+Every component type is represented at runtime by a `ComponentType` value record. Arch creates one automatically the first time a type is used.
+
+```csharp
+public readonly record struct ComponentType
+{
+    public readonly int Id;       // Globally unique integer assigned at registration time
+    public readonly int ByteSize; // sizeof(T) for structs, IntPtr.Size for reference types
+    public Type Type { get; }     // Resolves back to the CLR System.Type
+}
+```
+
+You can obtain the `ComponentType` for any registered type via the implicit conversion or the static helper:
+
+```csharp
+// Implicit conversion from System.Type
+ComponentType ct = typeof(Position);
+
+// Reverse: get back the CLR type
+Type clrType = ct; // implicit operator Type
+
+// Check registration
+bool registered = ComponentRegistry.Has<Position>();
+bool registered = ComponentRegistry.Has(typeof(Position));
+
+// Manual look-up
+bool found = ComponentRegistry.TryGet<Position>(out ComponentType posType);
+```
+
+## ComponentRegistry — automatic registration
+
+`ComponentRegistry` is a global static store that maps CLR types to their `ComponentType` descriptors. Registration happens automatically on first use through the `Component<T>` static class:
+
+```csharp
+// Triggered the first time any Arch API touches Position
+ComponentType posType = Component<Position>.ComponentType;
+// ComponentType.Id is now stable for the lifetime of the process
+```
+
+<Steps>
+  <Step title="First use triggers registration">
+    When you call `world.Create(typeof(Position), ...)` or `world.Has<Position>(entity)` for the first time, `Component<Position>` initialises its static constructor, which calls `ComponentRegistry.Add<Position>()`.
+  </Step>
+  <Step title="An integer ID is assigned">
+    The registry increments an internal counter and assigns `ComponentRegistry.Size - 1` as the new component's ID. IDs are zero-based and contiguous.
+  </Step>
+  <Step title="The mapping is stored">
+    The `ComponentType` (ID + byte size) is added to `ComponentRegistry.TypeToComponentType` and the type itself is written to `ComponentRegistry.Types` at the corresponding index.
+  </Step>
+</Steps>
+
+<Warning>
+  The registry is **not thread-safe for concurrent writes**. All component types should be first-used (and therefore registered) on a single thread before parallel queries begin — typically during application startup.
+</Warning>
+
+You can inspect all registered components at any time:
+
+```csharp
+// Total number of registered component types
+int total = ComponentRegistry.Size;
+
+// All registered types indexed by component ID
+ReadOnlySpan<Type?> types = ComponentRegistry.Types;
+
+// Full mapping from CLR Type to ComponentType
+IReadOnlyDictionary<Type, ComponentType> map = ComponentRegistry.TypeToComponentType;
+```
+
+## Generic API
+
+The generic API is the primary way to work with components. It resolves the component's array index at compile time through `Component<T>.ComponentType.Id`, which means no dictionary lookups at runtime.
+
+```csharp
+var world = World.Create();
+var entity = world.Create(typeof(Position), typeof(Velocity));
+
+// Check
+bool hasPos = world.Has<Position>(entity);
+
+// Read — returns ref T, no allocation
+ref Position pos = ref world.Get<Position>(entity);
+
+// Write in-place via the ref
+world.Get<Position>(entity) = new Position(1f, 2f);
+
+// Overwrite
+world.Set<Position>(entity, new Position(5f, 0f));
+
+// Add (structural change — entity migrates to a new archetype)
+world.Add<Health>(entity, new Health(100, 100));
+
+// Remove (structural change)
+world.Remove<Velocity>(entity);
+
+// Safe read — does not throw if missing
+if (world.TryGet<Health>(entity, out Health hp))
+{
+    Console.WriteLine(hp.Current);
+}
+
+// Ref-safe read with existence flag
+ref Health hpRef = ref world.TryGetRef<Health>(entity, out bool exists);
+```
+
+## Non-generic (reflection) API
+
+When the component type is only known at runtime — for example in editors, serialisers, or scripting layers — use the non-generic overloads that accept `ComponentType` or `object`:
+
+```csharp
+ComponentType posType = typeof(Position);
+
+// Check
+bool has = world.Has(entity, posType);
+
+// Read (returns object?, boxed for value types)
+object? value = world.Get(entity, posType);
+
+// Write
+world.Set(entity, new Position(3f, 4f)); // accepts object
+
+// Add with runtime type
+world.Add(entity, (object)new Velocity(0f, 1f));
+
+// Batch add several components at once
+Span<object> batch = stackalloc object[] { new Position(0, 0), new Velocity(1, 0) };
+world.AddRange(entity, batch);
+
+// Read multiple components at once
+Span<ComponentType> types = stackalloc ComponentType[] { posType, typeof(Velocity) };
+object?[] values = world.GetRange(entity, types);
+```
+
+## Component size and chunk capacity
+
+Arch calculates how many entities fit into a single chunk based on the total byte footprint of all components in the archetype's signature.
+
+```csharp
+// A chunk is at least 16 384 bytes by default.
+// Suppose an archetype has: Position (8 bytes) + Velocity (8 bytes) + Health (8 bytes)
+// Total per entity = 8 + 8 + 8 + 8 (Entity handle) = 32 bytes
+// Entities per chunk ≈ 16 384 / 32 = 512
+
+// You can inspect the result:
+Archetype arch = entity.GetArchetype();
+int perChunk = arch.EntitiesPerChunk;
+int chunkBytes = arch.ChunkSize;
+```
+
+<Tip>
+  Prefer splitting large monolithic structs into smaller, independently queryable components. Systems that only need `Position` pay no penalty for not touching `Health` — they iterate separate arrays that fit entirely in L1 cache.
+</Tip>

@@ -1,80 +1,204 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Arch ECS Quickstart: Your First World and Query"
+description: "Build a working Arch ECS program in minutes: create a world, define component structs, spawn entities, run a lambda query, and modify components at runtime."
 ---
 
-## Get started in three steps
+This guide walks you through the core Arch workflow from scratch. By the end you will have a program that creates a world, spawns entities with components, moves them using a query, and cleans up correctly. All code here is taken directly from the Arch source and samples — no invented APIs.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
 
-### Step 1: Set up your local environment
+<Step title="Install the package">
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Add Arch to your project using the .NET CLI:
 
-### Step 2: Deploy your changes
+```bash
+dotnet add package Arch --version 2.1.0-beta
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+See [Installation](/installation) for PackageReference syntax and build configuration options.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+</Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Define your components">
 
-### Step 3: Go live
+Components in Arch are plain C# structs. Using `record struct` gives you value-based equality and a concise primary-constructor syntax, which works well with Arch's generic APIs:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```csharp
+// Components are plain data — no base class or interface required
+public record struct Position(float X, float Y);
+public record struct Velocity(float Dx, float Dy);
+```
+
+Any struct type can be a component. The `record struct` syntax is a convention, not a requirement.
+
+<Tip>
+  Keep components small and focused on a single concern. Arch groups entities by their exact component signature, so narrower components give the query engine more flexibility.
+</Tip>
+
+</Step>
+
+<Step title="Create a world">
+
+A `World` is the top-level container for all entities and archetypes. Create one with `World.Create()` and dispose it when your application exits:
+
+```csharp
+using Arch.Core;
+
+// Create a world. Use 'using var' so it is disposed automatically.
+using var world = World.Create();
+```
+
+Multiple worlds can exist simultaneously, and each is fully independent. Call `World.Destroy(world)` explicitly if you need to tear down a world before your application exits.
+
+</Step>
+
+<Step title="Create entities">
+
+Pass component values directly to `world.Create()`. Arch infers the archetype from the component types and places the entity in the appropriate memory chunk:
+
+```csharp
+// Spawn a single entity with Position and Velocity
+var adventurer = world.Create(new Position(0, 0), new Velocity(1, 1));
+
+// Spawn many entities in a loop
+for (var i = 0; i < 1000; i++)
+{
+    world.Create(
+        new Position(0, 0),
+        new Velocity(i * 0.1f, i * 0.1f)
+    );
+}
+```
+
+The returned `Entity` value is a lightweight identifier (an ID and a version number) that you can store and pass around.
+
+</Step>
+
+<Step title="Query and update entities">
+
+A `QueryDescription` describes which components an entity must (or must not) have for it to be included in a query. Pass it to `world.Query()` with a lambda to iterate every matching entity:
+
+```csharp
+// Describe which entities you want: those with both Position and Velocity
+var query = new QueryDescription().WithAll<Position, Velocity>();
+
+// Iterate all matching entities and update their positions
+world.Query(in query, (ref Position pos, ref Velocity vel) => {
+    pos.X += vel.Dx;
+    pos.Y += vel.Dy;
+});
+
+// To also receive the Entity handle inside the lambda, add it as the first parameter
+world.Query(in query, (Entity entity, ref Position pos, ref Velocity vel) => {
+    pos.X += vel.Dx;
+    pos.Y += vel.Dy;
+    Console.WriteLine($"Moved entity {entity.Id} to ({pos.X}, {pos.Y})");
+});
+```
+
+Components are passed as `ref` parameters so mutations apply directly to the data stored in the chunk — no copy overhead.
+
+<Note>
+  `QueryDescription` supports four filter methods that can be chained: `.WithAll<>()`, `.WithAny<>()`, `.WithNone<>()`, and `.WithExclusive<>()`. See [Query descriptions](/querying/query-description) for the full reference.
+</Note>
+
+</Step>
+
+<Step title="Add and remove components">
+
+You can add or remove components from an individual entity at any time. Doing so moves the entity to a different archetype internally:
+
+```csharp
+// Add a new component to a single entity
+world.Add(adventurer, new Velocity(2, 2));
+
+// Remove a component from a single entity
+world.Remove<Velocity>(adventurer);
+
+// Check whether an entity has a component
+var hasVelocity = world.Has<Velocity>(adventurer);
+
+// Get a reference to a component to read or mutate it
+ref var position = ref world.Get<Position>(adventurer);
+position.X = 10;
+```
+
+Arch also supports bulk structural changes across all entities matching a query, which is useful for enabling and disabling behaviours at scale:
+
+```csharp
+// Add Velocity to every entity that does NOT already have it
+var withoutVelocity = new QueryDescription().WithNone<Velocity>();
+world.Add(in withoutVelocity, new Velocity(1, 1));
+
+// Remove Velocity from every entity that has it
+var withVelocity = new QueryDescription().WithAll<Velocity>();
+world.Remove<Velocity>(in withVelocity);
+```
+
+<Warning>
+  Adding or removing components (structural changes) inside an active query lambda is not safe. Use a [command buffer](/advanced/command-buffers) to defer structural changes until after the query completes.
+</Warning>
+
+</Step>
+
+<Step title="Destroy entities">
+
+Call `world.Destroy()` to remove an entity and free its slot for reuse:
+
+```csharp
+world.Destroy(adventurer);
+```
+
+When you are finished with the world itself, destroy it to release all memory:
+
+```csharp
+World.Destroy(world);
+```
+
+If you used `using var world = World.Create()`, disposal happens automatically when the variable goes out of scope.
+
+</Step>
+
+</Steps>
+
+## Complete example
+
+Here is the full minimal program from the Arch README that demonstrates the core loop:
+
+```csharp
+using Arch.Core;
+
+// Define components as record structs
+public record struct Position(float X, float Y);
+public record struct Velocity(float Dx, float Dy);
+
+// Create a world
+using var world = World.Create();
+
+// Spawn an entity with both components
+var adventurer = world.Create(new Position(0, 0), new Velocity(1, 1));
+
+// Build a query description
+var query = new QueryDescription().WithAll<Position, Velocity>();
+
+// Run the query — moves every matching entity by its velocity
+world.Query(in query, (Entity entity, ref Position pos, ref Velocity vel) => {
+    pos.X += vel.Dx;
+    pos.Y += vel.Dy;
+    Console.WriteLine($"Moved adventurer: {entity.Id}");
+});
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+<CardGroup cols={3}>
+  <Card title="World concepts" icon="layer-group" href="/concepts/world">
+    Understand archetypes, chunks, and how Arch organizes entity memory internally.
+  </Card>
+  <Card title="Query descriptions" icon="magnifying-glass" href="/querying/query-description">
+    Learn all four filter methods and the inline and parallel query APIs.
+  </Card>
+  <Card title="Command buffers" icon="list-check" href="/advanced/command-buffers">
+    Defer structural changes safely when modifying entities inside a query.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,0 +1,179 @@
+---
+title: "Lambda Queries: Delegate-Based Entity Iteration"
+description: "Use World.Query with ForEach delegates to iterate matching entities in Arch ECS. Lambda syntax is ideal for prototyping and moderate-traffic systems."
+---
+
+Lambda queries let you pass an anonymous function or named delegate directly to `world.Query`, keeping iteration logic co-located with the caller without any boilerplate struct definitions. They are the fastest path from a `QueryDescription` to running code on matching entities, and are well-suited for systems that are not on the hottest path in your frame budget.
+
+## Basic component query
+
+`world.Query<T...>(in description, ForEach<T...> forEach)` iterates every entity that matches the description and calls the delegate once per entity, passing component references by `ref`:
+
+```csharp
+var query = new QueryDescription().WithAll<Position, Velocity>();
+
+world.Query(in query, (ref Position pos, ref Velocity vel) =>
+{
+    pos.Vec2 += vel.Vec2;
+});
+```
+
+The `ForEach<T0, T1>` delegate signature used above is:
+
+```csharp
+public delegate void ForEach<T0, T1>(ref T0 t0Component, ref T1 t1Component);
+```
+
+Overloads exist for up to 25 type parameters. Components are passed as `ref` so mutations are written back to the chunk arrays directly with no copy overhead.
+
+## Entity + component query
+
+When you need the `Entity` handle alongside components, use the `ForEachWithEntity<T...>` overload on `world.Query`:
+
+```csharp
+var query = new QueryDescription().WithAll<Position, Health>();
+
+world.Query(in query, (Entity entity, ref Position pos, ref Health hp) =>
+{
+    if (hp.Value <= 0)
+    {
+        world.Destroy(entity);
+    }
+});
+```
+
+The underlying delegate type is:
+
+```csharp
+public delegate void ForEachWithEntity<T0, T1>(Entity entity, ref T0 t0Component, ref T1 t1Component);
+```
+
+## Entity-only query
+
+The non-generic overload accepts the `ForEach` delegate, which receives only the `Entity`:
+
+```csharp
+public delegate void ForEach(Entity entity);
+
+world.Query(in query, (Entity entity) =>
+{
+    Console.WriteLine(entity.Id);
+});
+```
+
+## Bulk operations on a query
+
+Several `World` methods accept a `QueryDescription` directly to apply a structural change to every matching entity at once. These bypass per-entity delegate overhead entirely.
+
+<Tabs>
+  <Tab title="Add component">
+
+    ```csharp
+    // Adds an int component with value 0 to every matching entity.
+    world.Add<int>(in query);
+
+    // Adds with an initial value.
+    world.Add(in query, 42);
+    ```
+
+    `Add` causes a structural change: each affected entity is moved to a new archetype.
+
+  </Tab>
+  <Tab title="Remove component">
+
+    ```csharp
+    world.Remove<Disabled>(in query);
+    ```
+
+    Like `Add`, this triggers archetype migration for each matched entity.
+
+  </Tab>
+  <Tab title="Set component value">
+
+    ```csharp
+    // Sets the Health component value on every matching entity without archetype migration.
+    world.Set(in query, new Health { Value = 100 });
+    ```
+
+    `Set` does not cause a structural change. It only updates the component value in-place.
+
+  </Tab>
+  <Tab title="Destroy entities">
+
+    ```csharp
+    world.Destroy(in query);
+    ```
+
+    Destroys every entity that matches the description. More efficient than iterating and calling `Destroy` per-entity because it operates at the archetype level.
+
+  </Tab>
+</Tabs>
+
+## Real-world example from the samples
+
+The following is taken directly from `Arch.Samples/Systems.cs`. The `ColorSystem` uses a lambda query to update a sprite color, then demonstrates bulk `Add` and `Remove`:
+
+```csharp
+public sealed class ColorSystem : SystemBase<GameTime>
+{
+    private readonly QueryDescription _entitiesToChangeColor =
+        new QueryDescription().WithAll<Sprite>();
+
+    private static GameTime? _gameTime;
+    private static Random _random;
+
+    public override void Update(in GameTime time)
+    {
+        _gameTime = time;
+
+        World.Query(in _entitiesToChangeColor, (ref Sprite sprite) =>
+        {
+            sprite.Color.R += (byte)(_gameTime.ElapsedGameTime.TotalMilliseconds * 0.08);
+            sprite.Color.G += (byte)(_gameTime.ElapsedGameTime.TotalMilliseconds * 0.08);
+            sprite.Color.B += (byte)(_gameTime.ElapsedGameTime.TotalMilliseconds * 0.08);
+        });
+
+        // Bulk add an int component to all matching entities.
+        World.Add(in _entitiesToChangeColor, _random.Next());
+
+        // Bulk remove that component immediately after.
+        World.Remove<int>(in _entitiesToChangeColor);
+    }
+}
+```
+
+## Query description caching
+
+Declare `QueryDescription` as a field on your system and mark it `readonly`. The `world.Query` overloads call `world.Query(in description)` internally, which looks up or creates a cached `Query` object. Reusing the same description instance avoids redundant hash computation on every call.
+
+```csharp
+// Declared once.
+private readonly QueryDescription _query =
+    new QueryDescription().WithAll<Position, Velocity>().WithNone<Disabled>();
+
+// Used every frame — no allocation.
+public void Tick()
+{
+    world.Query(in _query, (ref Position pos, ref Velocity vel) =>
+    {
+        pos.Vec2 += vel.Vec2;
+    });
+}
+```
+
+## Performance considerations
+
+<Note>
+  Lambda queries allocate a delegate object if the lambda captures any variables from the enclosing scope. On hot paths that run thousands of times per frame, prefer [inline queries](/querying/inline-queries) with structs to eliminate this overhead entirely.
+</Note>
+
+Use lambda queries for:
+
+- Prototyping and one-off operations
+- Systems with a small-to-moderate entity count
+- Logic that is called infrequently (e.g., event handlers, initialization)
+
+Prefer inline queries for:
+
+- Movement, physics, and rendering systems executed every frame
+- Any system where the delegate call overhead is measurable in profiling

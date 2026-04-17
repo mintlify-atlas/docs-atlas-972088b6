@@ -1,0 +1,161 @@
+---
+title: "QueryDescription: Filtering Entities by Component"
+description: "Learn how to use QueryDescription to define which entities a query matches using WithAll, WithAny, WithNone, and WithExclusive filters."
+---
+
+`QueryDescription` is the struct you use to declare which entities a query should match. It does not execute any iteration itself — it describes the component filter that Arch compiles into a cached `Query` object the first time it is evaluated against a `World`. Understanding how to compose a `QueryDescription` correctly is the foundation of every query pattern in Arch.
+
+## Filter methods
+
+Every filter method returns `ref QueryDescription`, allowing you to chain multiple constraints in a single expression. The four methods correspond to four independent bitset checks performed against each archetype's component signature.
+
+### `WithAll<T...>()`
+
+Requires that every listed component type is present on the entity. An entity that is missing even one of the listed types will not be matched.
+
+```csharp
+// Matches entities that have both Position and Velocity.
+var query = new QueryDescription().WithAll<Position, Velocity>();
+```
+
+```csharp
+// Multi-type overloads go up to 25 type parameters.
+var query = new QueryDescription().WithAll<Position, Velocity, Health, Mana>();
+```
+
+### `WithAny<T...>()`
+
+Requires that the entity has at least one of the listed component types. Entities that carry none of the listed types are excluded.
+
+```csharp
+// Matches entities that have Position, Velocity, or both.
+var query = new QueryDescription().WithAny<Position, Velocity>();
+```
+
+### `WithNone<T...>()`
+
+Excludes entities that carry any of the listed component types. Useful for filtering out disabled or tagged entities without removing them from the world.
+
+```csharp
+// Matches entities that do NOT have the Disabled component.
+var query = new QueryDescription().WithNone<Disabled>();
+```
+
+### `WithExclusive<T...>()`
+
+Matches only entities whose component set is exactly equal to the listed types — no more and no fewer. This is a stricter form of `WithAll` and is mutually exclusive with `WithAll`, `WithAny`, and `WithNone`.
+
+```csharp
+// Matches only entities with exactly Position and Velocity, nothing else.
+var query = new QueryDescription().WithExclusive<Position, Velocity>();
+```
+
+<Warning>
+  `WithExclusive` cannot be combined with `WithAll`, `WithAny`, or `WithNone` on the same `QueryDescription`. Arch asserts against this combination at runtime.
+</Warning>
+
+## Chaining filters
+
+All four methods return `ref QueryDescription`, so you can compose complex filters in a single expression:
+
+```csharp
+var query = new QueryDescription()
+    .WithAll<Position, Velocity>()
+    .WithAny<Renderable, Sprite>()
+    .WithNone<Disabled, Frozen>();
+```
+
+In production code, store the `QueryDescription` as a field so it is only constructed once per system:
+
+```csharp
+public sealed class MovementSystem : SystemBase<GameTime>
+{
+    // Constructed once, reused every frame.
+    private readonly QueryDescription _entitiesToMove =
+        new QueryDescription().WithAll<Position, Velocity>();
+
+    public override void Update(in GameTime time)
+    {
+        World.Query(in _entitiesToMove, (ref Position pos, ref Velocity vel) =>
+        {
+            pos.Vec2 += vel.Vec2 * (float)time.ElapsedGameTime.TotalMilliseconds;
+        });
+    }
+}
+```
+
+## Query caching
+
+When you call `world.Query(in description)` the world checks its internal `QueryCache` — a `Dictionary<QueryDescription, Query>` — using the description's pre-computed hash. If a matching `Query` object already exists it is returned immediately. Otherwise a new `Query` is built and stored.
+
+```csharp
+// First call: builds and caches the Query.
+var q1 = world.Query(in description);
+
+// Second call: returns the cached Query in O(1).
+var q2 = world.Query(in description);
+```
+
+Because equality is hash-based, two separately constructed `QueryDescription` instances that express the same filter will resolve to the same cached `Query`. This means you can safely construct a `QueryDescription` at call-site without allocating a new `Query` on every frame.
+
+<Tip>
+  Always declare `QueryDescription` objects as `readonly` fields on your system. This avoids repeated hash computation and dictionary lookups.
+</Tip>
+
+## How matching works internally
+
+`QueryDescription` stores four `Signature` values — `All`, `Any`, `None`, and `Exclusive`. Each `Signature` is converted to a `BitSet` when the `Query` is constructed. Archetype matching then becomes pure bitwise logic:
+
+```
+matches = All.All(archetype.BitSet)
+       && Any.Any(archetype.BitSet)
+       && None.None(archetype.BitSet)
+```
+
+For exclusive queries the check becomes:
+
+```
+matches = Exclusive.Exclusive(archetype.BitSet)
+```
+
+The `Query` re-evaluates this against all archetypes only when the set of archetypes in the world has changed (tracked by a hash of the archetype list). Subsequent iterations over the same cached `Query` pay no re-matching cost.
+
+## Reference
+
+<AccordionGroup>
+  <Accordion title="QueryDescription constructors">
+
+    You can pass signatures directly to the constructor instead of chaining methods:
+
+    ```csharp
+    var query = new QueryDescription(
+        all: Component<Position, Velocity>.Signature,
+        none: Component<Disabled>.Signature
+    );
+    ```
+
+    All parameters are optional and default to `Signature.Null`.
+  </Accordion>
+
+  <Accordion title="Calling Build() after mutation">
+
+    If you mutate a `QueryDescription`'s `All`, `Any`, `None`, or `Exclusive` properties directly (not via the fluent methods), call `Build()` afterwards to recompute the cached hash. Failing to do so will cause incorrect cache lookups.
+
+    ```csharp
+    description.All = Component<Position>.Signature;
+    description.Build(); // Recompute hash after direct mutation.
+    ```
+
+  </Accordion>
+
+  <Accordion title="QueryDescription.Null">
+
+    `QueryDescription.Null` is a static empty description that matches every entity in the world. Use it when you want an unconditional iteration.
+
+    ```csharp
+    // Iterates over all entities regardless of components.
+    world.Query(in QueryDescription.Null, (Entity entity) => { ... });
+    ```
+
+  </Accordion>
+</AccordionGroup>

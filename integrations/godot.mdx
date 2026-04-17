@@ -1,0 +1,165 @@
+---
+title: "Arch ECS with Godot: C# Setup, Systems, and Debugger"
+description: "Set up Arch ECS in a Godot C# project, run systems from Node lifecycle methods, and use the Godot Entity Debugger extension for in-editor inspection."
+---
+
+Godot's C# scripting layer targets .NET 6 and .NET 8, both of which Arch supports. You install Arch through NuGet just as you would in any other .NET project, then drive your world and systems from Godot's `Node` lifecycle — `_Ready()`, `_Process()`, and `_PhysicsProcess()`. There is no framework-level coupling between Arch entities and Godot nodes; Arch manages your data and logic while Godot handles rendering and input.
+
+## Installation
+
+<Steps>
+  <Step title="Create or open a Godot C# project">
+    In the Godot editor, make sure you have a C# project (`.csproj` present in the project root). You need .NET 6 SDK or later installed on your machine.
+  </Step>
+  <Step title="Add Arch via NuGet">
+    Open a terminal in your Godot project directory and run:
+
+    ```bash
+    dotnet add package Arch
+    ```
+
+    This adds Arch to your `.csproj` and restores dependencies. Rebuild the project in the Godot editor (**Build → Build Project**) so the editor picks up the new assembly.
+  </Step>
+  <Step title="Verify the build">
+    Check the **Output** panel in Godot for build errors. If the build succeeds, Arch types are available in all your C# scripts.
+  </Step>
+</Steps>
+
+## Project structure pattern
+
+A straightforward pattern is to create a single autoload `Node` (or a root `Node` in your main scene) that owns the `World` instance and drives your systems each frame. This keeps all ECS lifecycle in one place and avoids scattering world references across the scene tree.
+
+```csharp
+using Arch.Core;
+using Godot;
+
+// Components — plain structs, no Godot inheritance
+public struct Position { public Vector2 Vec; }
+public struct Velocity { public Vector2 Vec; }
+
+public partial class GameWorld : Node
+{
+    private World _world;
+    private QueryDescription _movementQuery;
+
+    public override void _Ready()
+    {
+        _world = World.Create();
+        _movementQuery = new QueryDescription().WithAll<Position, Velocity>();
+
+        // Spawn entities
+        for (var i = 0; i < 10_000; i++)
+        {
+            _world.Create(
+                new Position { Vec = new Vector2(GD.Randf() * 1280f, GD.Randf() * 720f) },
+                new Velocity { Vec = new Vector2(GD.Randf() - 0.5f, GD.Randf() - 0.5f) }
+            );
+        }
+    }
+
+    public override void _Process(double delta)
+    {
+        var dt = (float)delta;
+
+        _world.Query(in _movementQuery, (ref Position pos, ref Velocity vel) =>
+        {
+            pos.Vec += vel.Vec * dt;
+        });
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            World.Destroy(_world);
+        }
+        base.Dispose(disposing);
+    }
+}
+```
+
+<Note>
+  Declare your `QueryDescription` once in `_Ready()` or as a field. Constructing a new `QueryDescription` every frame allocates unnecessarily.
+</Note>
+
+## Using systems
+
+For larger projects, extract logic into system classes following the same `SystemBase<T>` pattern used in the [MonoGame samples](/integrations/monogame). The pattern translates directly to Godot: pass `double delta` as the state type and call each system from `_Process()`.
+
+```csharp
+using Arch.Core;
+
+public abstract class SystemBase<T>
+{
+    protected SystemBase(World world) => World = world;
+    public World World { get; }
+    public abstract void Update(in T state);
+}
+
+public sealed class MovementSystem : SystemBase<float>
+{
+    private readonly QueryDescription _query =
+        new QueryDescription().WithAll<Position, Velocity>();
+
+    public MovementSystem(World world) : base(world) { }
+
+    public override void Update(in float delta)
+    {
+        World.Query(in _query, (ref Position pos, ref Velocity vel) =>
+        {
+            pos.Vec += vel.Vec * delta;
+        });
+    }
+}
+```
+
+Then call it from your root node:
+
+```csharp
+private MovementSystem _movementSystem;
+
+public override void _Ready()
+{
+    _world = World.Create();
+    _movementSystem = new MovementSystem(_world);
+}
+
+public override void _Process(double delta)
+{
+    _movementSystem.Update((float)delta);
+}
+```
+
+<Tip>
+  Use `_PhysicsProcess()` instead of `_Process()` for systems that must run in sync with Godot's physics step — for example, any system that reads or writes physics-related data.
+</Tip>
+
+## Godot Entity Debugger
+
+The [Godot Entity Debugger](https://github.com/RoadTurtleGames/ArchGodotEntityDebugger) is a Godot editor extension that lets you inspect Arch entities and their components directly inside the Godot editor at runtime.
+
+<CardGroup cols={2}>
+  <Card title="Godot Entity Debugger" icon="github" href="https://github.com/RoadTurtleGames/ArchGodotEntityDebugger">
+    In-editor entity and component inspector for Arch worlds running in Godot.
+  </Card>
+  <Card title="Stride Entity Debugger" icon="github" href="https://github.com/Doprez/stride-arch-ecs">
+    An equivalent example and debugger for Arch running inside the Stride engine.
+  </Card>
+</CardGroup>
+
+Install the debugger by following the instructions in its repository. Once active, it adds a panel to the Godot editor bottom dock where you can browse archetypes, entities, and component values while the game is running.
+
+<Warning>
+  The entity debugger uses reflection to display component data. Enable it only in debug builds — do not ship it in your release export.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="MonoGame integration" icon="gamepad-2" href="/integrations/monogame">
+    Explore the most complete integration sample, including parallel queries and the full system pattern.
+  </Card>
+  <Card title="Arch.Extended" icon="puzzle" href="/integrations/extensions">
+    Official companion library with source generators and system abstractions that reduce boilerplate.
+  </Card>
+</CardGroup>

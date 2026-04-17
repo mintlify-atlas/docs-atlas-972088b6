@@ -1,0 +1,376 @@
+---
+title: "Using Arch ECS with MonoGame: Full Integration Guide"
+description: "Build a MonoGame game with Arch ECS using SystemBase<T>, lightweight component structs, parallel inline queries, and the official sample game loop."
+---
+
+The Arch repository includes a complete MonoGame sample (`Arch.Samples`) that demonstrates how to structure a real-time game using Arch. It spawns 150,000 moving entities and renders them at interactive frame rates using parallel inline queries and chunk enumeration. This page walks through every layer of that sample — components, systems, and the game loop — so you can apply the same patterns in your own MonoGame project.
+
+## Installation
+
+MonoGame projects target `net8.0` by default, which Arch fully supports.
+
+<Steps>
+  <Step title="Create a MonoGame project">
+    Use the MonoGame templates to scaffold a new project. The default `net8.0` target works without any changes.
+
+    ```bash
+    dotnet new mgdesktopgl -o MyGame
+    cd MyGame
+    ```
+  </Step>
+  <Step title="Add the Arch NuGet package">
+    ```bash
+    dotnet add package Arch
+    ```
+
+    Arch pulls in its own dependencies (`Arch.LowLevel`, `ZeroAllocJobScheduler`, and others) automatically.
+  </Step>
+  <Step title="Optionally add ZeroAllocJobScheduler for multithreading">
+    The samples configure a `JobScheduler` for parallel queries. It is included transitively with Arch, so no separate install is needed — but you do need to initialise it explicitly (see the game loop section below).
+  </Step>
+</Steps>
+
+## Components
+
+Components are plain `struct` types. Keep them small and focused on a single piece of data. The sample defines three:
+
+```csharp
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+
+namespace Arch.Samples;
+
+public struct Position
+{
+    public Vector2 Vec2;
+}
+
+public struct Velocity
+{
+    public Vector2 Vec2;
+}
+
+public struct Sprite
+{
+    public Texture2D Texture2D;
+    public Color Color;
+}
+```
+
+<Note>
+  Component structs do not need to implement any interface or inherit from any base class. The only requirement is that they are value types (`struct`).
+</Note>
+
+## SystemBase\<T\>
+
+The sample defines a minimal abstract base class that all systems extend. It holds a reference to the `World` and declares an `Update(in T state)` method that the game loop calls each tick:
+
+```csharp
+using Arch.Core;
+
+namespace Arch.Samples;
+
+public abstract class SystemBase<T>
+{
+    protected SystemBase(World world)
+    {
+        World = world;
+    }
+
+    public World World { get; private set; }
+
+    public abstract void Update(in T state);
+}
+```
+
+The type parameter `T` is whatever state the system needs from the outside — typically `GameTime` in a MonoGame project. Passing it as `in` avoids copying the struct on every call.
+
+## Systems
+
+### MovementSystem
+
+`MovementSystem` moves every entity that has both a `Position` and a `Velocity`. It defines two inner structs — `Move` and `Bounce` — that implement `IForEach<Position, Velocity>`. Arch inlines these structs into the query loop, which is more efficient than a lambda because the JIT can inline the call site directly.
+
+```csharp
+using Arch.Core;
+using Microsoft.Xna.Framework;
+
+namespace Arch.Samples;
+
+public sealed class MovementSystem : SystemBase<GameTime>
+{
+    private readonly QueryDescription _entitiesToMove =
+        new QueryDescription().WithAll<Position, Velocity>();
+
+    private readonly Rectangle _viewport;
+
+    public MovementSystem(World world, Rectangle viewport) : base(world)
+    {
+        _viewport = viewport;
+    }
+
+    // IForEach struct — inlined by the JIT for maximum throughput
+    private readonly struct Move : IForEach<Position, Velocity>
+    {
+        private readonly float _deltaTime;
+
+        public Move(float deltaTime) => _deltaTime = deltaTime;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Update(ref Position pos, ref Velocity vel)
+        {
+            pos.Vec2 += _deltaTime * vel.Vec2;
+        }
+    }
+
+    private struct Bounce : IForEach<Position, Velocity>
+    {
+        private Rectangle _viewport;
+
+        public Bounce(Rectangle viewport) => _viewport = viewport;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Update(ref Position pos, ref Velocity vel)
+        {
+            if (pos.Vec2.X >= _viewport.X + _viewport.Width)  vel.Vec2.X = -vel.Vec2.X;
+            if (pos.Vec2.Y >= _viewport.Y + _viewport.Height) vel.Vec2.Y = -vel.Vec2.Y;
+            if (pos.Vec2.X <= _viewport.X)                    vel.Vec2.X = -vel.Vec2.X;
+            if (pos.Vec2.Y <= _viewport.Y)                    vel.Vec2.Y = -vel.Vec2.Y;
+        }
+    }
+
+    public override void Update(in GameTime time)
+    {
+        var movementJob = new Move((float)time.ElapsedGameTime.TotalMilliseconds);
+        World.InlineParallelQuery<Move, Position, Velocity>(in _entitiesToMove, ref movementJob);
+
+        var bounceJob = new Bounce(_viewport);
+        World.InlineParallelQuery<Bounce, Position, Velocity>(in _entitiesToMove, ref bounceJob);
+    }
+}
+```
+
+<Tip>
+  `InlineParallelQuery` distributes work across the threads configured in `JobScheduler`. For single-threaded use, call `World.InlineQuery` instead — the signature is identical.
+</Tip>
+
+### ColorSystem
+
+`ColorSystem` demonstrates two things: a lambda-based query for convenience, and bulk component add/remove operations applied to all matching entities in a single call.
+
+```csharp
+public sealed class ColorSystem : SystemBase<GameTime>
+{
+    private readonly QueryDescription _entitiesToChangeColor =
+        new QueryDescription().WithAll<Sprite>();
+
+    private static GameTime? _gameTime;
+    private static Random _random;
+
+    public ColorSystem(World world) : base(world)
+    {
+        _random = new Random();
+    }
+
+    public override void Update(in GameTime time)
+    {
+        _gameTime = time;
+
+        // Lambda query — convenient for simple per-entity logic
+        World.Query(in _entitiesToChangeColor, (ref Sprite sprite) =>
+        {
+            sprite.Color.R += (byte)(_gameTime.ElapsedGameTime.TotalMilliseconds * 0.08);
+            sprite.Color.G += (byte)(_gameTime.ElapsedGameTime.TotalMilliseconds * 0.08);
+            sprite.Color.B += (byte)(_gameTime.ElapsedGameTime.TotalMilliseconds * 0.08);
+        });
+
+        // Bulk add an int component to all matching entities, then remove it
+        World.Add(in _entitiesToChangeColor, _random.Next());
+        World.Remove<int>(in _entitiesToChangeColor);
+    }
+}
+```
+
+### DrawSystem
+
+`DrawSystem` uses the chunk enumerator API to avoid lambda overhead entirely when drawing. It gets raw `Span<T>` arrays from each chunk and loops over them directly.
+
+```csharp
+public sealed class DrawSystem : SystemBase<GameTime>
+{
+    private readonly QueryDescription _entitiesToDraw =
+        new QueryDescription().WithAll<Position, Sprite>();
+
+    private readonly SpriteBatch _batch;
+
+    public DrawSystem(World world, SpriteBatch batch) : base(world)
+    {
+        _batch = batch;
+    }
+
+    public override void Update(in GameTime time)
+    {
+        _batch.Begin();
+
+        var query = World.Query(in _entitiesToDraw);
+        foreach (ref var chunk in query)
+        {
+            chunk.GetSpan<Position, Sprite>(out var positions, out var sprites);
+
+            foreach (var index in chunk)
+            {
+                ref var position = ref positions[index];
+                ref var sprite   = ref sprites[index];
+                _batch.Draw(sprite.Texture2D, position.Vec2, sprite.Color);
+            }
+        }
+
+        _batch.End();
+    }
+}
+```
+
+## Game loop
+
+The `Game` class ties everything together. The world and `JobScheduler` are created in `BeginRun()`, systems are updated in `Update()` and `Draw()`, and everything is disposed in `EndRun()`.
+
+```csharp
+using Arch.Core;
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using Schedulers;
+
+namespace Arch.Samples;
+
+public sealed class Game : Microsoft.Xna.Framework.Game
+{
+    private World _world;
+    private JobScheduler _jobScheduler;
+
+    private MovementSystem _movementSystem;
+    private ColorSystem    _colorSystem;
+    private DrawSystem     _drawSystem;
+
+    private readonly GraphicsDeviceManager _graphics;
+    private SpriteBatch _spriteBatch;
+    private Texture2D   _texture2D;
+    private Random      _random;
+
+    public Game()
+    {
+        _graphics = new GraphicsDeviceManager(this);
+        Content.RootDirectory = "Content";
+    }
+
+    protected override void Initialize()
+    {
+        _random    = new Random();
+        _texture2D = new Texture2D(GraphicsDevice, 10, 10);
+
+        var data = new Color[10 * 10];
+        for (var i = 0; i < data.Length; ++i) data[i] = Color.White;
+        _texture2D.SetData(data);
+
+        base.Initialize();
+    }
+
+    protected override void LoadContent()
+    {
+        _spriteBatch = new SpriteBatch(GraphicsDevice);
+    }
+
+    protected override void BeginRun()
+    {
+        base.BeginRun();
+
+        // Create world and configure the parallel job scheduler
+        _world = World.Create();
+        _jobScheduler = new JobScheduler(new JobScheduler.Config
+        {
+            ThreadPrefixName         = "Arch.Samples",
+            ThreadCount              = 0,  // 0 = use Environment.ProcessorCount
+            MaxExpectedConcurrentJobs = 64,
+            StrictAllocationMode     = false,
+        });
+        World.SharedJobScheduler = _jobScheduler;
+
+        // Initialise systems
+        _movementSystem = new MovementSystem(_world, GraphicsDevice.Viewport.Bounds);
+        _colorSystem    = new ColorSystem(_world);
+        _drawSystem     = new DrawSystem(_world, _spriteBatch);
+
+        // Spawn 150 000 entities
+        for (var index = 0; index < 150_000; index++)
+        {
+            _world.Create(
+                new Position { Vec2 = _random.NextVector2(GraphicsDevice.Viewport.Bounds) },
+                new Velocity { Vec2 = _random.NextVector2(-0.25f, 0.25f) },
+                new Sprite   { Texture2D = _texture2D, Color = _random.NextColor() }
+            );
+        }
+    }
+
+    protected override void Update(GameTime gameTime)
+    {
+        _movementSystem.Update(in gameTime);
+        _colorSystem.Update(in gameTime);
+        base.Update(gameTime);
+    }
+
+    protected override void Draw(GameTime gameTime)
+    {
+        _graphics.GraphicsDevice.Clear(Color.CornflowerBlue);
+        _drawSystem.Update(in gameTime);
+        base.Draw(gameTime);
+    }
+
+    protected override void EndRun()
+    {
+        base.EndRun();
+        World.Destroy(_world);
+        _jobScheduler.Dispose();
+    }
+}
+```
+
+<Note>
+  Set `ThreadCount = 0` to let `JobScheduler` pick the thread count based on `Environment.ProcessorCount`. Setting it explicitly is useful when you want to cap CPU usage in production builds.
+</Note>
+
+## Bulk entity operations
+
+The sample also shows how to create and destroy entities in bulk at runtime:
+
+```csharp
+// Bulk-create a span of entities with pre-allocated component types
+var amount = 500;
+Span<Entity> entities = stackalloc Entity[amount];
+_world.Create(entities, [typeof(Position), typeof(Velocity), typeof(Sprite)], amount);
+
+// Set component values on each new entity
+foreach (var entity in entities)
+{
+    entity.Set(
+        new Position { Vec2 = _random.NextVector2(GraphicsDevice.Viewport.Bounds) },
+        new Velocity { Vec2 = _random.NextVector2(-0.25f, 0.25f) },
+        new Sprite   { Texture2D = _texture2D, Color = _random.NextColor() }
+    );
+}
+```
+
+```csharp
+// Remove Velocity from all entities matching a query in one call
+var queryDesc = new QueryDescription().WithAll<Velocity>();
+_world.Remove<Velocity>(in queryDesc);
+```
+
+## Community projects
+
+<CardGroup cols={2}>
+  <Card title="Roguelite-Survivor" icon="github" href="https://github.com/proc-gen/roguelite-survivor">
+    A MonoGame + Arch clone of Vampire Survivors. A real-world reference for how to structure a full game with Arch.
+  </Card>
+  <Card title="Arch.Extended" icon="puzzle" href="https://github.com/genaray/Arch.Extended">
+    Official extension library with system abstractions, source generators, and tooling that reduce the boilerplate shown on this page.
+  </Card>
+</CardGroup>

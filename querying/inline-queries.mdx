@@ -1,0 +1,223 @@
+---
+title: "Inline Queries: Highest-Performance Iteration"
+description: "Use IForEach structs with world.InlineQuery to eliminate delegate allocation, enable JIT inlining, and achieve maximum iteration throughput on hot-path systems."
+---
+
+Inline queries are Arch's fastest single-threaded iteration mechanism. Instead of passing a delegate, you implement a struct that conforms to one of the `IForEach` interfaces, then hand that struct to `world.InlineQuery`. Because the call target is a struct method dispatched through a generic type parameter, the JIT can inline it completely — removing every layer of indirection that exists in delegate-based queries.
+
+## The `IForEach` interface family
+
+Arch provides three interface families, each covering a different combination of entity handle and component refs.
+
+### `IForEach` — entity handle only
+
+Defined in `World.cs`:
+
+```csharp
+public interface IForEach
+{
+    void Update(Entity entity);
+}
+```
+
+Use this when you need the entity but no component data, or when you retrieve components manually inside `Update`.
+
+### `IForEach<T0, T1, ...>` — component refs only
+
+Defined in `Templates/IForEach.cs` (source-generated up to 25 type parameters):
+
+```csharp
+public interface IForEach<T0>
+{
+    void Update(ref T0 t0Component);
+}
+
+public interface IForEach<T0, T1>
+{
+    void Update(ref T0 t0Component, ref T1 t1Component);
+}
+
+// ... up to IForEach<T0, T1, ..., T24>
+```
+
+This is the most common choice for pure data-transformation systems such as movement or physics.
+
+### `IForEachWithEntity<T0, T1, ...>` — entity handle and component refs
+
+Defined in `Templates/IForEachWithEntity.cs`:
+
+```csharp
+public interface IForEachWithEntity<T0>
+{
+    void Update(Entity entity, ref T0 t0Component);
+}
+
+public interface IForEachWithEntity<T0, T1>
+{
+    void Update(Entity entity, ref T0 t0Component, ref T1 t1Component);
+}
+```
+
+Use this when you need to look up related entities, check component presence, or record the entity alongside its component data.
+
+## Defining a job struct
+
+A job struct must be a `struct` and implement the appropriate interface. Mark `Update` with `[MethodImpl(MethodImplOptions.AggressiveInlining)]` to give the JIT the strongest hint to inline it:
+
+```csharp
+private readonly struct Move : IForEach<Position, Velocity>
+{
+    private readonly float _deltaTime;
+
+    public Move(float deltaTime)
+    {
+        _deltaTime = deltaTime;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Update(ref Position pos, ref Velocity vel)
+    {
+        pos.Vec2 += _deltaTime * vel.Vec2;
+    }
+}
+```
+
+State that does not change during iteration (such as `_deltaTime` above) should be stored as `readonly` fields on the struct and set at construction time. This replaces lambda captures without heap allocation.
+
+## Invoking `world.InlineQuery`
+
+### With a pre-existing struct instance
+
+Pass a `ref` to the struct so mutations to its fields are visible after the query completes:
+
+```csharp
+var movementJob = new Move((float)time.ElapsedGameTime.TotalMilliseconds);
+world.InlineQuery<Move, Position, Velocity>(in _entitiesToMove, ref movementJob);
+```
+
+The full signature of this overload is:
+
+```csharp
+public void InlineQuery<T, T0, T1>(in QueryDescription description, ref T iForEach)
+    where T : struct, IForEach<T0, T1>
+```
+
+### Without a struct instance (default-constructed)
+
+When your struct has no fields, Arch can default-construct it for you:
+
+```csharp
+world.InlineQuery<MyJob>(in query);
+```
+
+The entity-only variant maps to:
+
+```csharp
+public void InlineQuery<T>(in QueryDescription queryDescription) where T : struct, IForEach
+```
+
+### `IForEachWithEntity` variant
+
+Use `world.InlineEntityQuery` when your struct implements `IForEachWithEntity`:
+
+```csharp
+private struct Tracker : IForEachWithEntity<Position>
+{
+    public List<(Entity, Vector2)> Results;
+
+    public void Update(Entity entity, ref Position pos)
+    {
+        Results.Add((entity, pos.Vec2));
+    }
+}
+
+var tracker = new Tracker { Results = new List<(Entity, Vector2)>() };
+world.InlineEntityQuery<Tracker, Position>(in query, ref tracker);
+```
+
+## Real-world example from the samples
+
+The `MovementSystem` in `Arch.Samples/Systems.cs` uses two inline queries per frame — one for translation and one for boundary bouncing. Both structs are defined as private nested types:
+
+```csharp
+public sealed class MovementSystem : SystemBase<GameTime>
+{
+    private readonly QueryDescription _entitiesToMove =
+        new QueryDescription().WithAll<Position, Velocity>();
+
+    private readonly Rectangle _viewport;
+
+    private readonly struct Move : IForEach<Position, Velocity>
+    {
+        private readonly float _deltaTime;
+
+        public Move(float deltaTime) => _deltaTime = deltaTime;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Update(ref Position pos, ref Velocity vel)
+        {
+            pos.Vec2 += _deltaTime * vel.Vec2;
+        }
+    }
+
+    private struct Bounce : IForEach<Position, Velocity>
+    {
+        private Rectangle _viewport;
+
+        public Bounce(Rectangle viewport) => _viewport = viewport;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Update(ref Position pos, ref Velocity vel)
+        {
+            if (pos.Vec2.X >= _viewport.X + _viewport.Width)  vel.Vec2.X = -vel.Vec2.X;
+            if (pos.Vec2.Y >= _viewport.Y + _viewport.Height) vel.Vec2.Y = -vel.Vec2.Y;
+            if (pos.Vec2.X <= _viewport.X)                    vel.Vec2.X = -vel.Vec2.X;
+            if (pos.Vec2.Y <= _viewport.Y)                    vel.Vec2.Y = -vel.Vec2.Y;
+        }
+    }
+
+    public override void Update(in GameTime time)
+    {
+        var movementJob = new Move((float)time.ElapsedGameTime.TotalMilliseconds);
+        World.InlineQuery<Move, Position, Velocity>(in _entitiesToMove, ref movementJob);
+
+        var bounceJob = new Bounce(_viewport);
+        World.InlineQuery<Bounce, Position, Velocity>(in _entitiesToMove, ref bounceJob);
+    }
+}
+```
+
+## Parallel inline queries
+
+For multi-threaded execution, use `world.InlineParallelQuery`. It requires a `World.SharedJobScheduler` to be set before use and must only be called from the main thread:
+
+```csharp
+// Set once at startup.
+World.SharedJobScheduler = new JobScheduler(
+    new JobScheduler.Config { ThreadPrefixName = "Arch.Samples" }
+);
+
+// Per-frame usage — identical struct, different method.
+var movementJob = new Move((float)time.ElapsedGameTime.TotalMilliseconds);
+World.InlineParallelQuery<Move, Position, Velocity>(in _entitiesToMove, ref movementJob);
+```
+
+`InlineParallelQuery` distributes chunks across available processor cores and blocks until all are complete.
+
+<Warning>
+  `InlineParallelQuery` is not thread-safe. Call it only from the main thread. Do not nest parallel queries.
+</Warning>
+
+## Why inline queries are faster
+
+<AccordionGroup>
+  <Accordion title="No delegate allocation">
+    Lambda queries capture closures on the heap when they reference outer variables. Structs store state as value fields — no heap allocation occurs when constructing or passing the job.
+  </Accordion>
+  <Accordion title="Struct dispatch enables inlining">
+    When the JIT compiles `world.InlineQuery<Move, Position, Velocity>`, it generates a specialised version of the method body for the `Move` type. The call to `iForEach.Update(...)` is a direct struct method call, which the JIT inlines into the loop body, eliminating the call overhead entirely.
+  </Accordion>
+  <Accordion title="Virtual calls avoided">
+    Delegates involve an indirect call through a function pointer. Interface dispatch on a struct type parameter uses constrained virtual calls that the JIT devirtualises and inlines at the generic instantiation site.
+  </Accordion>
+</AccordionGroup>

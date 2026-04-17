@@ -1,0 +1,139 @@
+---
+title: "Command Buffers: Safe Deferred Structural Changes"
+description: "Record structural world mutations during a query loop and replay them safely after iteration completes, avoiding iterator invalidation."
+---
+
+Structural changes — creating entities, adding or removing components, destroying entities — invalidate the internal archetype iterators that queries rely on. Performing a structural change while a query loop is running causes undefined behaviour. A `CommandBuffer` solves this by recording each operation in memory and applying them all at once after the query exits, when the world is in a consistent state.
+
+## Creating a command buffer
+
+Instantiate `CommandBuffer` before starting any query that will need deferred mutations. The `initialCapacity` parameter controls how many entities are pre-allocated internally; the buffer grows automatically if you exceed it.
+
+```csharp
+using Arch.Buffer;
+
+var buffer = new CommandBuffer(initialCapacity: 128);
+```
+
+## Recording operations
+
+All recording methods are thread-safe — you can call them from inside a `ParallelQuery` callback. Operations are not applied to the world until you call `Playback`.
+
+### Create
+
+Buffer a new entity with a given set of component types. The method returns a temporary placeholder `Entity` with a negative id that becomes a real entity at playback time.
+
+```csharp
+Entity buffered = buffer.Create(new ComponentType[]
+{
+    typeof(Position),
+    typeof(Velocity),
+});
+```
+
+### Add
+
+Buffer adding a component to an existing entity. You can also set its initial value in the same call.
+
+```csharp
+buffer.Add<Health>(entity, new Health { Current = 100, Max = 100 });
+```
+
+### Set
+
+Buffer overwriting the value of a component that the entity already owns. Unlike `Add`, this does not trigger an archetype move.
+
+```csharp
+buffer.Set<Velocity>(entity, new Velocity { X = 5f, Y = 0f });
+```
+
+### Remove
+
+Buffer removing a component type from an entity. The entity moves to a new archetype at playback time.
+
+```csharp
+buffer.Remove<Frozen>(entity);
+```
+
+### Destroy
+
+Buffer destroying an entity. The entity is removed from the world during `Playback`.
+
+```csharp
+buffer.Destroy(entity);
+```
+
+## Playing back and disposing
+
+Call `Playback` after the query loop finishes. By default (`dispose: true`) the buffer clears its internal state immediately after applying all commands, leaving it ready for the next frame.
+
+```csharp
+buffer.Playback(world);
+```
+
+Pass `dispose: false` to keep the recorded commands in memory — useful if you want to replay the same set of operations more than once.
+
+```csharp
+buffer.Playback(world, dispose: false);
+```
+
+When you are completely done with a buffer, call `Dispose` to release pooled memory:
+
+```csharp
+buffer.Dispose();
+```
+
+## Typical usage pattern
+
+<Steps>
+  <Step title="Create the buffer">
+    Allocate the `CommandBuffer` once per system update, before querying.
+
+    ```csharp
+    var buffer = new CommandBuffer(128);
+    ```
+  </Step>
+  <Step title="Fill during query">
+    Record operations inside the query body. The world is not modified yet.
+
+    ```csharp
+    var query = new QueryDescription().WithAll<Enemy, Health>();
+
+    world.Query(in query, (Entity entity, ref Health hp) =>
+    {
+        if (hp.Current <= 0)
+        {
+            buffer.Destroy(entity);
+        }
+        else if (hp.Current < 20)
+        {
+            buffer.Add<LowHealthMarker>(entity);
+        }
+    });
+    ```
+  </Step>
+  <Step title="Play back after the query">
+    Apply all recorded commands. Structural changes happen here, outside the iterator.
+
+    ```csharp
+    buffer.Playback(world);
+    ```
+  </Step>
+</Steps>
+
+## Chaining buffered entities
+
+`Create` returns a placeholder entity. You can record additional operations against it before playback and they will resolve to the real entity automatically.
+
+```csharp
+Entity placeholder = buffer.Create(new ComponentType[] { typeof(Position) });
+buffer.Set<Position>(placeholder, new Position { X = 10f, Y = 20f });
+buffer.Add<Velocity>(placeholder, new Velocity { X = 1f, Y = 0f });
+
+// At Playback: real entity is created, then Position is set, then Velocity is added.
+buffer.Playback(world);
+```
+
+<Warning>
+`Playback` must be called from the main thread. The buffer records operations in a thread-safe way, but applying them to the world is a single-threaded operation.
+</Warning>

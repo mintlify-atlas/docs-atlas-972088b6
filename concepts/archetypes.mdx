@@ -1,0 +1,192 @@
+---
+title: "Archetypes and the Chunk Memory Model in Arch"
+description: "Learn how Arch groups entities by component signature into archetypes and 16 KB chunks, and how adding or removing components migrates entities at runtime."
+---
+
+Arch stores entities in a structure-of-arrays (SoA) layout that is designed for sequential, cache-friendly access. The key to this design is the **archetype**: a bucket that holds every entity sharing exactly the same set of component types. Inside each archetype, entities are packed into fixed-size memory blocks called **chunks**. This page explains how that hierarchy works, why it is fast, and what happens when the component set of an entity changes.
+
+## What is an Archetype?
+
+An `Archetype` is an internal grouping that the `World` creates and manages automatically. Two entities belong to the same archetype if and only if they carry the same component types — order does not matter, only the set.
+
+```
+World
+ ├── Archetype [Position, Velocity]      ← all "moving" entities
+ │    ├── Chunk 0   [e0, e3, e7, …]
+ │    └── Chunk 1   [e12, e19, …]
+ ├── Archetype [Position, Velocity, Health]
+ │    └── Chunk 0   [e1, e2, e5, …]
+ └── Archetype [Position]
+      └── Chunk 0   [e4, e6, …]
+```
+
+You never create an `Archetype` explicitly. `World.Create(params ComponentType[])` calls `GetOrCreate` internally, which returns the matching archetype or creates a new one:
+
+```csharp
+// These two entities end up in the same Archetype
+Entity a = world.Create(typeof(Position), typeof(Velocity));
+Entity b = world.Create(typeof(Velocity), typeof(Position)); // same signature
+
+// This entity lives in a different Archetype
+Entity c = world.Create(typeof(Position), typeof(Velocity), typeof(Health));
+```
+
+Archetypes are identified by a hash of their `Signature` — the sorted set of component IDs. The hash is order-independent, so `[Position, Velocity]` and `[Velocity, Position]` resolve to the same archetype.
+
+## The Chunk data structure
+
+Each archetype subdivides its entity storage into `Chunk` blocks. A `Chunk` is a contiguous region of managed memory that stores one array per component type, plus one array of `Entity` handles.
+
+```csharp
+public partial struct Chunk
+{
+    public readonly Entity[]   Entities;              // one handle per slot
+    public readonly Array[]    Components;            // one typed array per component
+    public readonly int[]      ComponentIdToArrayIndex; // lookup: component ID → array index
+
+    public int  Count    { get; }    // occupied slots
+    public int  Capacity { get; }    // total slots
+    public bool IsFull   { get; }
+    public bool IsEmpty  { get; }    // note: IsEmpty = Count < Capacity (has room)
+}
+```
+
+Because all arrays inside a chunk are the same length (`Capacity`), the index of an entity in `Entities[i]` corresponds directly to index `i` in every component array. No pointer chasing is needed.
+
+### Chunk capacity and sizing
+
+The number of entities per chunk is computed when the archetype is first created, based on the world's `BaseChunkSize` and `BaseChunkEntityCount`:
+
+```csharp
+public sealed partial class Archetype
+{
+    public int BaseChunkSize    { get; } // minimum chunk size in bytes
+    public int ChunkSize        { get; } // actual allocated size in bytes
+    public int EntitiesPerChunk { get; } // derived entity capacity per chunk
+    public int EntityCount      { get; } // total live entities in this archetype
+    public int ChunkCount       { get; } // number of allocated chunks
+    public Chunks Chunks        { get; } // the chunk array
+}
+```
+
+When all slots in the current chunk are filled, the archetype allocates a new chunk transparently:
+
+```csharp
+// Access a specific chunk by index
+ref Chunk chunk = ref archetype.GetChunk(index);
+```
+
+### Slot — an entity's address
+
+A `Slot` is the two-integer address that pinpoints an entity inside an archetype:
+
+```csharp
+public record struct Slot
+{
+    public int Index;      // row within the chunk
+    public int ChunkIndex; // which chunk
+}
+```
+
+The world's `EntityInfo` stores one `Slot` per entity ID, enabling O(1) look-up of any entity's components.
+
+## ChunkLayoutMode
+
+Three sizing strategies control how Arch calculates `EntitiesPerChunk` for each archetype:
+
+<AccordionGroup>
+  <Accordion title="FixedChunkSize">
+    The chunk is exactly `FixedChunkSize` bytes. Entity capacity = `floor(FixedChunkSize / bytesPerEntity)`.
+
+    Best when you want predictable memory granularity and your entity footprints vary widely across archetypes.
+  </Accordion>
+
+  <Accordion title="FixedEntityCount">
+    The chunk always holds exactly `FixedEntityCount` entities. Chunk size grows to fit the component layout.
+
+    Best when you want a predictable iteration batch size regardless of component size.
+  </Accordion>
+
+  <Accordion title="MinChunkSizeAndMinEntities (default)">
+    Arch satisfies both a minimum byte size **and** a minimum entity count, using whichever constraint produces the larger chunk. The defaults (`BaseChunkSize = 16 384`, `BaseChunkEntityCount = 100`) align chunks to the L1/L2 boundary on most hardware.
+
+    This is the mode used by `World.Create()` with its default parameters.
+  </Accordion>
+</AccordionGroup>
+
+## Structural changes — moving between archetypes
+
+Adding or removing a component changes an entity's signature, which means it belongs to a different archetype. Arch handles this migration automatically:
+
+<Steps>
+  <Step title="Locate the target archetype">
+    The world computes the hash of the new signature (old signature ± the changed component) and looks it up via add/remove edges cached on the archetype. A new archetype is created if none exists.
+  </Step>
+  <Step title="Allocate a slot in the destination">
+    The entity is appended to the destination archetype's current chunk. A new chunk is allocated if needed.
+  </Step>
+  <Step title="Copy component data">
+    All component arrays that exist in both archetypes are bulk-copied from the old slot to the new slot. The new component (if adding) is initialised to the supplied value or default.
+  </Step>
+  <Step title="Backfill the vacated slot">
+    The last entity in the source archetype is moved into the gap left by the migrated entity (swap-and-pop). The `EntityInfo` is updated to reflect the new slot for the swapped entity.
+  </Step>
+  <Step title="Update EntityInfo">
+    The migrated entity's entry in `EntityInfo` is updated to point at the new archetype and slot.
+  </Step>
+</Steps>
+
+```csharp
+// Structural change: entity migrates from [Position, Velocity] to [Position, Velocity, Frozen]
+world.Add<Frozen>(entity);
+
+// Structural change: entity migrates back to [Position, Velocity]
+world.Remove<Frozen>(entity);
+```
+
+<Warning>
+  Structural changes must not run while any other operation on the same world is in progress. Do not add/remove components from inside a parallel query callback.
+</Warning>
+
+## Why this layout is fast
+
+Querying for all entities with `[Position, Velocity]` visits only the archetypes that are a superset of that signature. Within each matching archetype, iteration walks straight through chunk arrays sequentially — no pointer indirection, no sparse look-up.
+
+```
+Cache line (64 bytes)
+┌─────────────────────────────────────────┐
+│ pos[0] pos[1] pos[2] pos[3] pos[4] …   │  ← Position array
+└─────────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│ vel[0] vel[1] vel[2] vel[3] vel[4] …   │  ← Velocity array
+└─────────────────────────────────────────┘
+```
+
+Each array spans multiple consecutive cache lines. The CPU prefetcher can pipeline loads effectively, yielding near-peak memory bandwidth even without SIMD. Components that are not included in a query (e.g. `Health`) are never touched, so they never evict useful data from cache.
+
+## Inspecting archetypes at runtime
+
+```csharp
+// All archetypes in the world
+foreach (Archetype arch in world)
+{
+    Console.WriteLine($"Signature: {arch.Signature}");
+    Console.WriteLine($"  Entities: {arch.EntityCount}");
+    Console.WriteLine($"  Chunks:   {arch.ChunkCount}");
+    Console.WriteLine($"  Bytes/chunk: {arch.ChunkSize}");
+    Console.WriteLine($"  Entities/chunk: {arch.EntitiesPerChunk}");
+}
+
+// Find by signature
+bool found = world.TryGetArchetype(
+    new Signature(typeof(Position), typeof(Velocity)),
+    out Archetype? arch
+);
+
+// Iterate chunks inside an archetype
+foreach (ref Chunk chunk in arch)
+{
+    int liveEntities = chunk.Count;
+    ref Position firstPos = ref chunk.GetFirst<Position>();
+}
+```

@@ -1,0 +1,139 @@
+---
+title: "Pure ECS Mode: Minimal Entity Struct Overhead"
+description: "Remove the WorldId field from the Entity struct to shrink its size and eliminate world back-reference lookups in maximum-throughput scenarios."
+---
+
+By default, every `Entity` value in Arch carries three fields: `Id`, `WorldId`, and `Version`. The `WorldId` field lets entity extension methods (such as `entity.Get<T>()`) resolve their owning world without an explicit parameter. In Pure ECS mode, `WorldId` is removed from the struct entirely, reducing its memory footprint and eliminating the indirection through the global world registry on every entity operation.
+
+## What changes in Pure ECS mode
+
+<Tabs>
+  <Tab title="Normal mode (default)">
+    The `Entity` struct has three fields. Extension methods that look up the world from a static registry are available.
+
+    ```csharp
+    // Entity struct in normal mode
+    public readonly struct Entity
+    {
+        public readonly int Id;
+        public readonly int WorldId;  // present
+        public readonly int Version;
+    }
+    ```
+
+    Entity extension methods work directly on the entity value:
+
+    ```csharp
+    // Extension methods resolve the world via WorldId internally
+    ref var pos = ref entity.Get<Position>();
+    entity.Set(new Velocity { X = 1f });
+    bool alive = entity.IsAlive();
+    ```
+  </Tab>
+  <Tab title="Pure ECS mode">
+    The `Entity` struct has two fields. `WorldId` is removed and `EntityExtensions` are unavailable.
+
+    ```csharp
+    // Entity struct in Pure ECS mode
+    public readonly struct Entity
+    {
+        public readonly int Id;
+        // WorldId is absent
+        public readonly int Version;
+    }
+    ```
+
+    All world operations require an explicit `World` reference:
+
+    ```csharp
+    // Must pass the world explicitly on every call
+    ref var pos = ref world.Get<Position>(entity);
+    world.Set(entity, new Velocity { X = 1f });
+    bool alive = world.IsAlive(entity);
+    ```
+  </Tab>
+</Tabs>
+
+## Enabling Pure ECS mode
+
+Two named build configurations in `Arch.csproj` activate the `PURE_ECS` preprocessor symbol:
+
+```xml
+<PropertyGroup Condition="'$(Configuration)'=='Debug-PureECS'">
+  <DefineConstants>TRACE;PURE_ECS;</DefineConstants>
+</PropertyGroup>
+
+<PropertyGroup Condition="'$(Configuration)'=='Release-PureECS'">
+  <DefineConstants>TRACE;PURE_ECS</DefineConstants>
+</PropertyGroup>
+```
+
+Build with either configuration:
+
+```bash
+dotnet build -c Release-PureECS
+```
+
+If you reference Arch as a NuGet package, add the constant to your own project instead:
+
+```xml
+<DefineConstants>PURE_ECS</DefineConstants>
+```
+
+<Note>
+`PURE_ECS` and `EVENTS` are mutually exclusive in practice. The event system uses world lookups that rely on `WorldId`. Enabling both may produce compilation errors.
+</Note>
+
+## Trade-offs
+
+<CardGroup cols={2}>
+  <Card title="Benefits" icon="arrow-trend-up">
+    Smaller `Entity` value (two ints instead of three). No global world array lookup per entity operation. Marginally better cache utilisation when storing large arrays of entities.
+  </Card>
+  <Card title="Costs" icon="arrow-trend-down">
+    `EntityExtensions` are removed. Every call to get, set, add, or remove a component must pass a `World` reference explicitly. Code that stores only `Entity` values cannot perform world operations without separate world access.
+  </Card>
+</CardGroup>
+
+## Refactoring for Pure ECS
+
+The main code change is replacing entity extension calls with equivalent `World` method calls.
+
+```csharp
+// Normal mode
+world.Query(in query, (Entity entity) =>
+{
+    ref var hp = ref entity.Get<Health>();
+    hp.Current -= 10;
+});
+
+// Pure ECS mode — world must be captured or passed in
+world.Query(in query, (Entity entity) =>
+{
+    ref var hp = ref world.Get<Health>(entity);
+    hp.Current -= 10;
+});
+```
+
+For inline queries with `IForEach`, store the world reference as a field on the job struct:
+
+```csharp
+public struct DamageJob : IForEach
+{
+    public World World;
+
+    public void Update(Entity entity)
+    {
+        ref var hp = ref World.Get<Health>(entity);
+        hp.Current -= 5;
+    }
+}
+
+// Usage — pass the struct directly by ref
+var job = new DamageJob { World = world };
+world.InlineQuery<DamageJob>(in query, ref job);
+```
+
+## When to use Pure ECS
+
+Pure ECS mode is appropriate when you control all code paths that interact with entities, always have an explicit `World` reference available in context, and are optimising for maximum entity throughput in a profiler-confirmed bottleneck. For most games, the default mode is simpler and the overhead difference is negligible.

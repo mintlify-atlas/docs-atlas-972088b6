@@ -1,0 +1,221 @@
+---
+title: "Enumerators: Manual Archetype and Chunk Iteration"
+description: "Manually enumerate matching archetypes and chunks using QueryArchetypeIterator and QueryChunkIterator for low-level access to raw component arrays and spans."
+---
+
+Every query in Arch resolves to a set of archetypes, and every archetype stores its entities in fixed-size memory blocks called chunks. Lambda and inline queries abstract this structure away. Enumerators expose it directly, giving you precise control over which archetypes and chunks you visit and how you read component data. This is useful for batch rendering, custom serialization, and any algorithm that benefits from operating on contiguous component arrays rather than individual entities.
+
+## Getting a `Query` object
+
+`world.Query(in description)` returns the cached `Query` object for a given description. You can iterate this object directly or call methods on it to get typed iterators:
+
+```csharp
+var description = new QueryDescription().WithAll<Position, Sprite>();
+Query query = world.Query(in description);
+```
+
+The returned `Query` is the same cached instance used internally by lambda and inline queries.
+
+## Iterating chunks with `foreach`
+
+`Query` implements `GetEnumerator()`, returning a `QueryChunkEnumerator`. You can iterate it with a standard `foreach` loop and receive `ref Chunk` on each iteration:
+
+```csharp
+var description = new QueryDescription().WithAll<Position, Sprite>();
+var query = world.Query(in description);
+
+foreach (ref var chunk in query)
+{
+    // chunk is a ref to each matching, non-empty Chunk.
+}
+```
+
+This is the pattern used in the `DrawSystem` sample:
+
+```csharp
+var query = World.Query(in _entitiesToDraw);
+foreach (ref var chunk in query)
+{
+    chunk.GetSpan<Position, Sprite>(out var positions, out var sprites);
+
+    foreach (var index in chunk)
+    {
+        ref var position = ref positions[index];
+        ref var sprite   = ref sprites[index];
+        _batch.Draw(sprite.Texture2D, position.Vec2, sprite.Color);
+    }
+}
+```
+
+`foreach (var index in chunk)` uses `EntityIterator`, which yields integer indices in reverse order for cache efficiency. Use these indices to index into the spans returned by `GetSpan<T>`.
+
+## Reading component data from a chunk
+
+### `Chunk.GetSpan<T>()`
+
+Returns a `Span<T>` over the component array for the given type. The span covers the chunk's full capacity, so index only within `[0, chunk.Count)`:
+
+```csharp
+Span<Position> positions = chunk.GetSpan<Position>();
+foreach (var index in chunk)
+{
+    ref var pos = ref positions[index];
+    pos.Vec2 += Vector2.One;
+}
+```
+
+### `Chunk.GetArray<T>()`
+
+Returns the raw `T[]` backing array. Use this when you need to pass a managed array to an API that does not accept spans:
+
+```csharp
+Position[] posArray = chunk.GetArray<Position>();
+```
+
+### `Chunk.GetFirst<T>()`
+
+Returns a `ref` to the first element of the component array. Useful when you want to walk the array manually using `Unsafe.Add`:
+
+```csharp
+ref var first = ref chunk.GetFirst<Position>();
+foreach (var index in chunk)
+{
+    ref var pos = ref Unsafe.Add(ref first, index);
+}
+```
+
+## Iterating archetypes
+
+Use `query.GetArchetypeIterator()` when you need to operate at the archetype level — for example, to inspect the archetype's signature or to handle each archetype's chunks separately:
+
+```csharp
+foreach (var archetype in query.GetArchetypeIterator())
+{
+    Console.WriteLine($"Archetype: {archetype.Signature}");
+    Console.WriteLine($"Entities:  {archetype.EntityCount}");
+    Console.WriteLine($"Chunks:    {archetype.ChunkCount}");
+}
+```
+
+`GetArchetypeIterator()` returns a `QueryArchetypeIterator`, which wraps a `QueryArchetypeEnumerator`. Only archetypes with at least one entity are yielded.
+
+## Iterating all chunks across archetypes
+
+`query.GetChunkIterator()` yields every non-empty chunk across all matching archetypes in a single flat loop:
+
+```csharp
+foreach (ref var chunk in query.GetChunkIterator())
+{
+    Span<Velocity> velocities = chunk.GetSpan<Velocity>();
+    foreach (var i in chunk)
+    {
+        velocities[i].Vec2 *= 0.99f; // Apply drag.
+    }
+}
+```
+
+This is equivalent to iterating archetypes and their chunks nested, but expressed as a single loop.
+
+## Collecting matching archetypes with `GetArchetypes`
+
+If you need to store matching archetypes in a buffer for deferred processing, use `world.GetArchetypes`:
+
+```csharp
+var description = new QueryDescription().WithAll<Position>();
+Span<Archetype> buffer = stackalloc Archetype[world.CountEntities(in description)];
+world.GetArchetypes(in description, buffer);
+
+foreach (var archetype in buffer)
+{
+    // Process archetype...
+}
+```
+
+## Full low-level example
+
+The following pattern mirrors how the `DrawSystem` sample manually accesses component arrays for bulk rendering:
+
+```csharp
+var description = new QueryDescription().WithAll<Position, Sprite>();
+var query = world.Query(in description);
+
+foreach (ref var chunk in query)
+{
+    // Obtain spans over the component arrays in this chunk.
+    var positions = chunk.GetSpan<Position>();
+    var sprites   = chunk.GetSpan<Sprite>();
+
+    // chunk itself is iterable and yields entity indices.
+    foreach (var index in chunk)
+    {
+        ref var pos    = ref positions[index];
+        ref var sprite = ref sprites[index];
+
+        spriteBatch.Draw(sprite.Texture2D, pos.Vec2, sprite.Color);
+    }
+}
+```
+
+## Enumerator types reference
+
+<AccordionGroup>
+  <Accordion title="QueryChunkEnumerator">
+
+    Iterates all non-empty chunks across matching archetypes. Obtained from `query.GetEnumerator()` or by calling `foreach` directly on a `Query`. `Current` is `ref Chunk`.
+
+    ```csharp
+    foreach (ref var chunk in query) { }
+    ```
+
+  </Accordion>
+  <Accordion title="QueryArchetypeEnumerator">
+
+    Iterates all non-empty archetypes matching the query. Obtained from `query.GetArchetypeIterator().GetEnumerator()`. `Current` is `Archetype`.
+
+    ```csharp
+    foreach (var archetype in query.GetArchetypeIterator()) { }
+    ```
+
+  </Accordion>
+  <Accordion title="EntityIterator / EntityEnumerator">
+
+    Iterates entity slot indices within a single chunk. Used with `foreach (var index in chunk)`. Yields `int` indices in descending order. Use the index to access component spans.
+
+    ```csharp
+    foreach (var index in chunk)
+    {
+        ref var pos = ref positions[index];
+    }
+    ```
+
+  </Accordion>
+  <Accordion title="ChunkRangeEnumerator">
+
+    Iterates a contiguous range of chunks within a single archetype. Used internally by the parallel job system to partition work across threads.
+
+  </Accordion>
+</AccordionGroup>
+
+## When to use enumerators
+
+<Tabs>
+  <Tab title="Use enumerators when">
+
+    - You need to operate on raw `Span<T>` or `T[]` arrays directly (e.g., bulk rendering, serialization, SIMD operations).
+    - You need archetype-level metadata such as `EntityCount`, `ChunkCount`, or `Signature`.
+    - You are building tooling that inspects world state without prior knowledge of component types.
+    - You want to process chunks in a specific order or skip certain archetypes based on runtime conditions.
+
+  </Tab>
+  <Tab title="Prefer lambda or inline queries when">
+
+    - You are writing standard per-entity game logic (movement, AI, health).
+    - You do not need access to chunk or archetype metadata.
+    - Code clarity is more important than raw throughput.
+
+  </Tab>
+</Tabs>
+
+<Note>
+  Enumerators use `ref struct` and unsafe pointer arithmetic internally. They cannot be stored in fields or passed across `await` boundaries. Use them entirely within a synchronous method scope.
+</Note>

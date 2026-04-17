@@ -1,0 +1,148 @@
+---
+title: "Performance Best Practices and Tuning for Arch ECS"
+description: "Practical guidance on archetype layout, chunk sizing, query reuse, iteration strategy, and bulk operations to get the most from Arch."
+---
+
+Arch is designed for high-throughput entity iteration, and most of its performance characteristics follow directly from how archetypes and chunks are laid out in memory. Understanding those internals lets you make informed trade-offs rather than guessing at bottlenecks. The recommendations below are ordered from highest to lowest typical impact.
+
+## Archetype layout and fragmentation
+
+Every unique combination of component types forms a separate archetype. Entities that share the same set of components live in the same archetype and are iterated together in tight loops. The more archetypes you have, the more loop overhead the query system pays per frame.
+
+**Minimise the number of distinct component sets.** Add "marker" components only when they meaningfully change iteration behaviour, not to tag arbitrary state. Prefer removing components via `CommandBuffer` to changing component values, when the goal is to stop a system from processing an entity.
+
+```csharp
+// Prefer: one archetype for all enemies
+world.Create(new Entity(), new Enemy(), new Health(), new Position());
+
+// Avoid: many tiny archetypes for each enemy variant
+world.Create(new Entity(), new GoblinEnemy(), new Health(), new Position());
+world.Create(new Entity(), new OrcEnemy(), new Health(), new Position());
+```
+
+## Chunk sizing
+
+Arch groups entities into `Chunk` arrays inside each archetype. The `ChunkLayoutConfig` struct controls how large each chunk is. Choose the mode that matches your entity sizes and working-set requirements.
+
+```csharp
+public enum ChunkLayoutMode
+{
+    FixedChunkSize,            // allocate exactly ChunkSizeBytes bytes per chunk
+    FixedEntityCount,          // fit exactly TargetEntitiesPerChunk entities per chunk
+    MinChunkSizeAndMinEntities // satisfy both a minimum byte size and minimum entity count
+}
+```
+
+The default `ChunkLayoutConfig` values are:
+
+```csharp
+var config = new ChunkLayoutConfig
+{
+    LayoutMode       = ChunkLayoutMode.MinChunkSizeAndMinEntities,
+    FixedChunkSize   = 32 * 1024,   // 32 KB (used by FixedChunkSize mode)
+    FixedEntityCount = 256,          // (used by FixedEntityCount mode)
+    MinChunkSize     = 16 * 1024,   // 16 KB minimum (used by MinChunkSizeAndMinEntities)
+    MinEntityCount   = 64,           // 64 entity minimum (used by MinChunkSizeAndMinEntities)
+};
+```
+
+<AccordionGroup>
+  <Accordion title="FixedChunkSize">
+    Allocates chunks of exactly `FixedChunkSize` bytes regardless of how many entities fit. Predictable memory footprint. Works well when entities are large (many or wide components) because it avoids tiny chunks with single-digit entity counts.
+  </Accordion>
+  <Accordion title="FixedEntityCount">
+    Sizes chunks so that exactly `TargetEntitiesPerChunk` entities fit, making entity counts per chunk predictable. Useful when you want consistent parallelism granularity regardless of component size.
+  </Accordion>
+  <Accordion title="MinChunkSizeAndMinEntities (default)">
+    Satisfies both a minimum byte size and a minimum entity count, taking whichever constraint produces a larger chunk. The most cache-friendly default for mixed workloads.
+  </Accordion>
+</AccordionGroup>
+
+## Reusing query descriptions
+
+A `QueryDescription` encodes the `All`, `Any`, `None`, and `Exclusive` component filters. Building one is cheap, but looking up the internal `Query` object it maps to involves a hash-map lookup. Cache the description in a field so the lookup runs once per system type rather than once per frame.
+
+```csharp
+public class MovementSystem
+{
+    // Constructed once, reused every Update()
+    private static readonly QueryDescription _query =
+        new QueryDescription().WithAll<Position, Velocity>();
+
+    public void Update(World world)
+    {
+        world.Query(in _query, (ref Position pos, ref Velocity vel) =>
+        {
+            pos.X += vel.X;
+            pos.Y += vel.Y;
+        });
+    }
+}
+```
+
+## Choosing the right iteration API
+
+Arch offers several query styles with different performance profiles. From fastest to slowest on hot paths:
+
+<CardGroup cols={2}>
+  <Card title="Inline queries" icon="bolt">
+    `world.InlineQuery<T>` with a struct implementing `IForEach`. Zero delegate allocation; the JIT can inline the body. Best choice for update-every-frame systems.
+  </Card>
+  <Card title="Parallel inline queries" icon="bolt-lightning">
+    `world.InlineParallelQuery<T>` — the inline approach extended to multiple threads. Use when entity count is large enough to justify thread scheduling overhead (typically tens of thousands of entities).
+  </Card>
+  <Card title="Lambda queries" icon="arrow-right">
+    `world.Query(in query, delegate)` — convenient but allocates a delegate on the heap if captured variables are involved. Acceptable for infrequent queries.
+  </Card>
+  <Card title="Enumerator" icon="list">
+    Manual `foreach` over `world.Query(in query)`. Useful for conditional early-exit, but has the highest per-call overhead. Avoid on hot paths.
+  </Card>
+</CardGroup>
+
+## Bulk entity creation
+
+Creating entities one at a time in a loop allocates archetype slots and recycles IDs individually. Use the bulk `world.Create` overload when spawning large numbers of entities at once — it reserves a contiguous block of archetype slots in a single operation.
+
+```csharp
+// Prefer: one bulk call with a span to receive handles
+Span<Entity> entities = stackalloc Entity[1000];
+var signature = new Signature(typeof(Position), typeof(Velocity));
+world.Create(entities, in signature, 1000);
+
+// Avoid: loop of single creates
+for (var i = 0; i < 1000; i++)
+{
+    world.Create(typeof(Position), typeof(Velocity));
+}
+```
+
+Use `world.EnsureCapacity` at startup when you know the approximate entity count, to pre-allocate archetype and entity storage and avoid repeated resizing during the first frame.
+
+```csharp
+var signature = new Signature(typeof(Position), typeof(Velocity));
+world.EnsureCapacity(in signature, 10_000);
+```
+
+## Avoiding structural changes inside query loops
+
+Structural changes (add, remove, destroy) invalidate archetype iterators. Attempting them inside an active query loop causes undefined behaviour. Always defer structural changes to a `CommandBuffer` and play it back after the query completes.
+
+```csharp
+var buffer = new CommandBuffer(128);
+
+world.Query(in query, (Entity entity, ref Health hp) =>
+{
+    if (hp.Current <= 0)
+        buffer.Destroy(entity); // buffered, not immediate
+});
+
+buffer.Playback(world); // applied here, outside the query
+```
+
+## Pure ECS for maximum entity throughput
+
+In scenarios where shaving every nanosecond matters, build with the `PURE_ECS` preprocessor symbol to remove `WorldId` from the `Entity` struct. The smaller struct improves cache density when iterating large entity arrays. See the [Pure ECS](/advanced/pure-ecs) page for a full explanation of the trade-offs.
+
+## Benchmark reference
+
+Independent benchmarks comparing Arch against other C# ECS frameworks are available at [Doraku/Ecs.CSharp.Benchmark](https://github.com/Doraku/Ecs.CSharp.Benchmark). The results show how Arch's archetype-and-chunk layout compares across creation, iteration, and structural change workloads.

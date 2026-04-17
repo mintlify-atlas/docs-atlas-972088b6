@@ -1,0 +1,66 @@
+---
+title: "What is Arch ECS? Concepts and Feature Overview"
+description: "Arch is a C# archetype ECS with cache-friendly 16 KB chunks, multithreading, command buffers, and an AOT-safe API for .NET 6, .NET 8, and .NET Standard 2.1."
+---
+
+Arch is a high-performance, archetype-based Entity Component System (ECS) for C# and .NET. It organizes entities into archetypes — groups of entities that share an identical component signature — and packs those entities into contiguous 16KB memory chunks. The result is iteration speed that rivals ECS frameworks written in C++ and Rust, all from a clean, self-explanatory API with no hidden abstractions or unnecessary overhead.
+
+## What is ECS?
+
+The Entity Component System pattern separates identity, data, and behavior. An **entity** is a lightweight identifier — nothing more than an ID. **Components** are plain data structs attached to entities to describe their state, such as a position or velocity. **Systems** contain the logic that queries for entities with specific components and transforms their data each frame. By keeping data flat and contiguous in memory, ECS workloads stay cache-friendly and scale to millions of entities.
+
+## Key features
+
+<CardGroup cols={3}>
+  <Card title="Cache-efficient archetypes" icon="bolt">
+    Entities with matching component signatures share 16KB chunks of contiguous memory, maximizing CPU cache utilization during iteration.
+  </Card>
+  <Card title="Multithreaded queries" icon="microchip">
+    Distribute iteration work across all CPU cores with parallel query APIs backed by a zero-allocation job scheduler.
+  </Card>
+  <Card title="Minimal, clean API" icon="code">
+    Both generic and non-generic overloads are available. Lambda, inline, enumerator, and parallel query styles are all supported.
+  </Card>
+  <Card title="Command buffers" icon="list-check">
+    Defer structural changes — adding or removing components — safely using command buffers, which is essential inside active query loops.
+  </Card>
+  <Card title="Events" icon="bell">
+    Subscribe to typed component lifecycle events for reactive game logic without coupling systems together.
+  </Card>
+  <Card title="AOT friendly" icon="puzzle-piece">
+    Works with Unity IL2CPP, Godot, MonoGame, and any other AOT compilation target out of the box.
+  </Card>
+</CardGroup>
+
+## Target frameworks
+
+Arch targets three frameworks from a single NuGet package, so you can use it in any modern .NET project:
+
+- **net8.0** — .NET 8 (recommended for new projects)
+- **net6.0** — .NET 6
+- **netstandard2.1** — .NET Standard 2.1 (Unity, Godot, and other runtimes)
+
+<Note>
+  Unity projects should target the `netstandard2.1` build. See the integration guides for engine-specific setup instructions.
+</Note>
+
+## Extensions
+
+The core Arch library is intentionally minimal. The [Arch.Extended](https://github.com/genaray/Arch.Extended) ecosystem adds source generators, system base classes, and tooling that reduce boilerplate in larger projects. Community integrations also exist for Unity, Godot, and the Stride engine.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Add the Arch NuGet package and configure build options for your project.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Create a world, define components, spawn entities, and run your first query.
+  </Card>
+  <Card title="World concepts" icon="layer-group" href="/concepts/world">
+    Understand how worlds, archetypes, and chunks relate to each other.
+  </Card>
+  <Card title="Query descriptions" icon="magnifying-glass" href="/querying/query-description">
+    Filter entities using WithAll, WithAny, WithNone, and WithExclusive constraints.
+  </Card>
+</CardGroup>
